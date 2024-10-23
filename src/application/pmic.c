@@ -1425,13 +1425,20 @@ pmic_result_t pmic_configure_battery_charger(bool enable, uint16_t current) {
     res = pmic_set_battery_load_enable(false);  // Disable 30mA load on battery
     if (res != PMIC_OK) return res;
     if (enable) {
+        res = pmic_set_charge_enable(true);  // Start charging
+        if (res != PMIC_OK) return res;
+        res = pmic_set_charge_battery_precharge_threshold_3v(true);  // Switch from precharge to fast charge at 3v
+        if (res != PMIC_OK) return res;
+        res = pmic_set_charge_recharge_threshold_200mv_offset(
+            false);  // Recharge when battery voltage is 100mV below target
+        if (res != PMIC_OK) return res;
         res = pmic_set_charge_voltage_limit(4200);  // Charge up to 4.2v
         if (res != PMIC_OK) return res;
         res = pmic_set_charge_current_fast(current);
         if (res != PMIC_OK) return res;
-        res = pmic_set_charge_enable(true);  // Start charging
     } else {
         res = pmic_set_charge_enable(false);  // Stop charging
+        if (res != PMIC_OK) return res;
     }
     return res;
 }
