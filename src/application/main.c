@@ -173,6 +173,11 @@ typedef enum {
     I2C_REG_PMIC_CHARGING_CONTROL,
     I2C_REG_PMIC_CHARGING_STATUS,
     I2C_REG_PMIC_OTG_CONTROL,
+    I2C_REG_ALARM_0,
+    I2C_REG_ALARM_1,
+    I2C_REG_ALARM_2,
+    I2C_REG_ALARM_3,
+    I2C_REG_PMIC_POWER_CONTROL,
     I2C_REG_LAST,  // End of list marker
 } i2c_register_t;
 
@@ -309,21 +314,27 @@ void timer3_init() {
 }
 
 void set_pmic_status(pmic_result_t pmic_result) {
-    i2c_registers[I2C_REG_PMIC_COMM_FAULT] |= (pmic_result & 1);
-    if (i2c_registers[I2C_REG_PMIC_COMM_FAULT] & 1) {
-        // Latch bit 2 after a communication fault has occured
-        // can be reset by writing to the I2C register from the host
-        if ((i2c_registers[I2C_REG_PMIC_COMM_FAULT] >> 1) & 1) {
-            // First communication fault, generate interrupt
+    if (pmic_result != PMIC_OK) {
+        // Set bit 1 after a communication fault has occured
+        // bit 1 will be reset immediately after communication is restored
+        i2c_registers[I2C_REG_PMIC_COMM_FAULT] |= (1 << 0);
+        if (!(i2c_registers[I2C_REG_PMIC_COMM_FAULT] & (1 << 1))) {
+            // Latch bit 2 after a communication fault has occured
+            // can be reset by writing to the I2C register from the host
+            i2c_registers[I2C_REG_PMIC_COMM_FAULT] |= (1 << 1);
+            // Generate interrupt
             interrupt_set(false, false, true);
         }
-        i2c_registers[I2C_REG_PMIC_COMM_FAULT] |= (1 << 1);
+    } else {
+        // Clear bit 1 after a transaction has been completed succesfully
+        i2c_registers[I2C_REG_PMIC_COMM_FAULT] &= ~(1 << 0);
     }
 }
 
 // I2C write callback
 void i2c_write_cb(uint8_t reg, uint8_t length) {
     static uint32_t new_rtc_value = 0;
+    static uint32_t new_alarm_value = 0;
 
     while (length > 0) {
         switch (reg) {
@@ -384,6 +395,31 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
             }
             case I2C_REG_PMIC_OTG_CONTROL:
                 set_pmic_status(pmic_set_otg_enable(i2c_registers[I2C_REG_PMIC_OTG_CONTROL] & 1));
+                break;
+            case I2C_REG_ALARM_0:
+                new_alarm_value &= 0xFFFFFF00;
+                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_0];
+                break;
+            case I2C_REG_ALARM_1:
+                new_alarm_value &= 0xFFFF00FF;
+                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_1];
+                break;
+            case I2C_REG_ALARM_2:
+                new_alarm_value &= 0xFF00FFFF;
+                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_2];
+                break;
+            case I2C_REG_ALARM_3:
+                new_alarm_value &= 0x00FFFFFF;
+                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_3];
+                rtc_set_alarm(new_alarm_value);
+                break;
+            case I2C_REG_PMIC_POWER_CONTROL:
+                if (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] & 1) {
+                    // Enable alarm pin output if bit 2 is set
+                    rtc_configure_wakeup_pin(i2c_registers[I2C_REG_PMIC_POWER_CONTROL] & 2);
+                    // So long and thanks for all the fish
+                    pmic_power_off();
+                }
                 break;
             default:
                 if (reg >= I2C_REG_BACKUP_0 && reg <= I2C_REG_BACKUP_83) {
@@ -454,11 +490,12 @@ void configure_usb_input(void) {
 void pmic_task(void) {
     // Periodic task for controlling PMIC
     static uint8_t empty_battery_delay = 4;
+    static uint8_t battery_redetect_timer = 0;
     static bool prev_adc_contiuous = false;
     static bool adc_active = false;
     static bool prev_vbus_attached = false;
     static bool vbus_attached = false;
-    static bool battery_attached = false;
+    static bool battery_attached = true;
     static bool prev_force_disable_charging = false;
     static uint16_t prev_pmic_target_charging_current = 0;
 
@@ -498,13 +535,6 @@ void pmic_task(void) {
             set_pmic_status(res);
             return;  // Stop on communication error
         }
-
-        // uint16_t adc_vbus = 0;
-        // res = pmic_get_adc_vbus(&adc_vbus, NULL);
-        // if (res != PMIC_OK) {
-        //    set_pmic_status(res);
-        //    return;  // Stop on communication error
-        //}
 
         uint16_t adc_ichgr = 0;
         res = pmic_get_adc_ichgr(&adc_ichgr);
@@ -556,12 +586,24 @@ void pmic_task(void) {
         }
     }
 
+    // Read voltage on USB interface and power good status
     uint16_t adc_vbus = 0;
     pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
     LockI2CSlave(true);
     i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
     i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
     LockI2CSlave(false);
+
+    if ((!battery_attached) && (!pmic_force_detect_battery) && (!pmic_force_disable_charging) && (vbus_attached)) {
+        // Automatically redetect battery if no battery found
+        if (battery_redetect_timer < 100) {
+            battery_redetect_timer++;
+        } else {
+            battery_redetect_timer = 0;
+            prev_vbus_attached = false;  // Force redetect
+        }
+    }
+
     if (pmic_force_disable_charging) {
         // Charging has been disabled by user
         if (!prev_force_disable_charging) {
@@ -703,6 +745,14 @@ int main() {
 
     // Backup registers
     bkp_read_all();
+
+    // Read alarm setting
+    uint32_t alarm = 0;
+    rtc_get_alarm(&alarm);
+    i2c_registers[I2C_REG_ALARM_0] = (alarm >> 0) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_1] = (alarm >> 8) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_2] = (alarm >> 16) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_3] = (alarm >> 24) & 0xFF;
 
 #if HARDWARE_REV > 1
     bool power_button_latch = false;

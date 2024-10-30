@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 void rtc_disable_wp(void);
@@ -20,3 +21,6 @@ void rtc_init(void);
 uint16_t bkp_read(uint8_t position);
 void bkp_write(uint8_t position, uint16_t value);
 void bkp_write_byte(uint8_t position, uint8_t value);
+void rtc_set_alarm(uint32_t wakeup_time);
+void rtc_get_alarm(uint32_t* out_wakeup_time);
+void rtc_configure_wakeup_pin(bool enable);

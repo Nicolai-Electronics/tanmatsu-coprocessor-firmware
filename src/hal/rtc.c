@@ -64,24 +64,6 @@ void rtc_set_counter(uint32_t value) {
     rtc_enable_wp();
 }
 
-void rtc_set_alarm(uint32_t wakeup_time) {
-    rtc_disable_wp();
-    rtc_enter_config();
-    rtc_wait_for_last_task();
-    rtc_wait_for_sync();
-    RTC->ALRMH = wakeup_time >> 16;
-    RTC->ALRML = wakeup_time & 0xFFFF;
-    rtc_wait_for_last_task();
-    // RTC->CTLRH |= (1 << 1);  // Enable alarm interrupt
-    rtc_exit_config();
-    rtc_wait_for_last_task();
-    rtc_enable_wp();
-}
-
-void rtc_clear_alarm(void) {
-    // RTC->CTLRH &= ~(1 << 1);  // Disable alarm interrupt
-}
-
 uint32_t rtc_get_counter(void) {
     uint16_t high1 = RTC->CNTH;
     uint16_t high2 = RTC->CNTH;
@@ -326,4 +308,34 @@ void bkp_write_byte(uint8_t position, uint8_t value) {
         register_value |= value;
     }
     bkp_write(position >> 1, register_value);
+}
+
+void rtc_set_alarm(uint32_t wakeup_time) {
+    rtc_disable_wp();
+    rtc_enter_config();
+    rtc_wait_for_last_task();
+    rtc_wait_for_sync();
+    RTC->ALRMH = wakeup_time >> 16;
+    RTC->ALRML = wakeup_time & 0xFFFF;
+    rtc_wait_for_last_task();
+    rtc_exit_config();
+    rtc_wait_for_last_task();
+    rtc_enable_wp();
+}
+
+void rtc_get_alarm(uint32_t* out_wakeup_time) {
+    *out_wakeup_time = RTC->ALRML + (RTC->ALRMH << 16);
+}
+
+void rtc_configure_wakeup_pin(bool enable) {
+    rtc_disable_wp();
+    rtc_enter_config();
+    BKP->TPCTLR &= ~(BKP_TPE);  // Disable tamper function
+    if (enable) {
+        BKP->OCTLR |= BKP_ASOE;  // Enable alarm output
+    } else {
+        BKP->OCTLR &= ~(BKP_ASOE);  // Disable alarm output
+    }
+    rtc_exit_config();
+    rtc_enable_wp();
 }
