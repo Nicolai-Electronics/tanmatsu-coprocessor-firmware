@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21.0)
 cmake_policy(VERSION 3.21)
 
 set(PROJECT_NAME "coprocessor")
-set(PREFIX "riscv64-elf-")
+set(PREFIX "riscv64-elf-" CACHE STRING "Toolchain prefix")
 
 project(${PROJECT_NAME} LANGUAGES C)
 

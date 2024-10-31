@@ -2,11 +2,12 @@
 all: build
 
 BUILD ?= "build"
+CMAKE_FLAGS ?= "-DPREFIX=riscv64-elf-"
 
 .PHONY: build
 build:
 	mkdir -p ${BUILD}
-	cd ${BUILD}; cmake ../src
+	cd ${BUILD}; cmake ${CMAKE_FLAGS} ../src
 	cd ${BUILD}; make
 
 .PHONY: clean
