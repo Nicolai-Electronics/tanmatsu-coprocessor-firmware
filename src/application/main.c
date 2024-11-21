@@ -1,5 +1,6 @@
 // Tanmatsu coprocessor firmware
 // SPDX-FileCopyrightText: 2024 Nicolai Electronics
+// SPDX-FileCopyrightText: 2024 Orange-Murker
 // SPDX-License-Identifier: MIT
 
 #include <stdbool.h>
