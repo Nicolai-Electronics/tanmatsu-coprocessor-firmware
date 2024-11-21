@@ -348,7 +348,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
             case I2C_REG_OUTPUT:
                 funDigitalWrite(pin_amplifier_enable, i2c_registers[I2C_REG_OUTPUT] & 1);
 #if HARDWARE_REV > 1
-                funDigitalWrite(pin_camera, i2c_registers[I2C_REG_OUTPUT] & 2);
+                funDigitalWrite(pin_camera, (i2c_registers[I2C_REG_OUTPUT] >> 1) & 1);
 #endif
                 break;
             case I2C_REG_RADIO_CONTROL:
@@ -739,6 +739,9 @@ int main() {
 
     funPinMode(pin_amplifier_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_amplifier_enable, FUN_LOW);
+
+    funPinMode(pin_camera, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
+    funDigitalWrite(pin_camera, FUN_LOW);
 
     // Real time clock
     rtc_init();
