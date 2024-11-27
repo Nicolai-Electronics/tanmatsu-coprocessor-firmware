@@ -1,5 +1,6 @@
 // Tanmatsu coprocessor firmware
 // SPDX-FileCopyrightText: 2024 Nicolai Electronics
+// SPDX-FileCopyrightText: 2024 Orange-Murker
 // SPDX-License-Identifier: MIT
 
 #include <stdbool.h>
@@ -363,7 +364,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 break;
             case I2C_REG_OUTPUT:
                 funDigitalWrite(pin_amplifier_enable, i2c_registers[I2C_REG_OUTPUT] & 1);
-                camera_enable_target = i2c_registers[I2C_REG_OUTPUT] & 2;
+                camera_enable_target = (i2c_registers[I2C_REG_OUTPUT] >> 1) & 1;
                 break;
             case I2C_REG_RADIO_CONTROL:
                 radio_target = i2c_registers[I2C_REG_RADIO_CONTROL];
@@ -825,6 +826,16 @@ int main() {
 
     funPinMode(pin_amplifier_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_amplifier_enable, FUN_LOW);
+
+#if HARDWARE_REV == 2
+    funPinMode(pin_camera, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
+    funDigitalWrite(pin_camera, FUN_LOW);
+#endif
+
+#if HARDWARE_REV > 2
+    funPinMode(pin_led_data, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
+    funDigitalWrite(pin_led_data, FUN_LOW);
+#endif
 
     // Real time clock
     rtc_init();
