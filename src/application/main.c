@@ -13,14 +13,11 @@
 #include "pmic.h"
 #include "rtc.h"
 
-// Board revision
-#define HW_REV 2
-
 // Firmware version
 #define FW_VERSION 8
 
-#define OVERRIDE_C6  false
-#define HARDWARE_REV 2  // 1 for prototype 1, 2 for prototype 2
+// Hardware version
+#define HARDWARE_REV 3  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
 
 // Pins
 const uint8_t pin_c6_enable = PB8;
@@ -36,7 +33,11 @@ const uint8_t pin_sda = PB7;         // Uses hardware I2C peripheral
 const uint8_t pin_scl = PB6;         // Uses hardware I2C peripheral
 
 #if HARDWARE_REV > 1
+#if HARDWARE_REV > 2
+const uint8_t pin_led_data = PA11;
+#else
 const uint8_t pin_camera = PA11;
+#endif
 const uint8_t pin_power_in = PA12;  // Input from power button
 const uint8_t pin_pm_sda = PB11;
 const uint8_t pin_pm_scl = PB10;
@@ -181,6 +182,13 @@ typedef enum {
     I2C_REG_LAST,  // End of list marker
 } i2c_register_t;
 
+typedef enum {
+    RADIO_STATE_OFF = 0,
+    RADIO_STATE_BOOTLOADER= 1,
+    RADIO_STATE_APPLICATION = 2,
+    RADIO_STATE_LAST,
+} radio_state_t;
+
 volatile uint8_t i2c_registers[I2C_REG_LAST];
 
 // Interrupt flags
@@ -194,6 +202,14 @@ volatile bool pmic_adc_continuous = false;
 volatile bool pmic_force_disable_charging = false;
 volatile bool pmic_force_detect_battery = false;
 volatile uint16_t pmic_target_charging_current = 512;
+
+// Radio, USB and camera flags
+volatile radio_state_t radio_state = RADIO_STATE_OFF;
+volatile radio_state_t radio_target = RADIO_STATE_OFF;
+volatile bool radio_hold = false;
+volatile bool usb_otg_enable_state = false;
+volatile bool usb_otg_enable_target = false;
+volatile bool camera_enable_target = false;
 
 // Interrupts
 void interrupt_update_reg(void) {
@@ -347,15 +363,13 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 break;
             case I2C_REG_OUTPUT:
                 funDigitalWrite(pin_amplifier_enable, i2c_registers[I2C_REG_OUTPUT] & 1);
-#if HARDWARE_REV > 1
-                funDigitalWrite(pin_camera, i2c_registers[I2C_REG_OUTPUT] & 2);
-#endif
+                camera_enable_target = i2c_registers[I2C_REG_OUTPUT] & 2;
                 break;
             case I2C_REG_RADIO_CONTROL:
-#if OVERRIDE_C6 == false  // Ignore radio control register if radio override is active
-                funDigitalWrite(pin_c6_enable, ((i2c_registers[I2C_REG_RADIO_CONTROL] >> 0) & 1) ? FUN_HIGH : FUN_LOW);
-                funDigitalWrite(pin_c6_boot, ((i2c_registers[I2C_REG_RADIO_CONTROL] >> 1) & 1) ? FUN_HIGH : FUN_LOW);
-#endif
+                radio_target = i2c_registers[I2C_REG_RADIO_CONTROL];
+                if (radio_target >= RADIO_STATE_LAST) {
+                    radio_target = RADIO_STATE_APPLICATION;
+                }
                 break;
             case I2C_REG_RTC_VALUE_0:
                 new_rtc_value &= 0xFFFFFF00;
@@ -394,7 +408,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 break;
             }
             case I2C_REG_PMIC_OTG_CONTROL:
-                set_pmic_status(pmic_set_otg_enable(i2c_registers[I2C_REG_PMIC_OTG_CONTROL] & 1));
+                usb_otg_enable_target = i2c_registers[I2C_REG_PMIC_OTG_CONTROL] & 1;
                 break;
             case I2C_REG_ALARM_0:
                 new_alarm_value &= 0xFFFFFF00;
@@ -667,6 +681,82 @@ void pmic_task(void) {
     i2c_registers[I2C_REG_PMIC_CHARGING_STATUS] = charging_status;
 }
 
+void radio_task() {
+    bool enable_and_camera = false;
+    bool boot_and_usb = false;
+
+    if (camera_enable_target && (radio_target == RADIO_STATE_OFF)) {
+        // If user requires camera to be enabled then the radio needs to be enabled too
+        radio_target = RADIO_STATE_APPLICATION;
+    }
+
+    switch (radio_target) {
+        case RADIO_STATE_BOOTLOADER:
+            switch (radio_state) {
+                case RADIO_STATE_BOOTLOADER:
+                    // Target state reached, radio on and hopefully in bootloader mode
+                    enable_and_camera = true;
+                    boot_and_usb = usb_otg_enable_target;
+                    break;
+                case RADIO_STATE_APPLICATION:
+                    // Wrong state, disable radio
+                    enable_and_camera = false;
+                    boot_and_usb = false;
+                    radio_state = RADIO_STATE_OFF;
+                    break;
+                case RADIO_STATE_OFF:
+                default:
+                    // Radio is off, enable radio in bootloader mode
+                    enable_and_camera = true;
+                    boot_and_usb = false;
+                    radio_state = RADIO_STATE_BOOTLOADER;
+                    break;
+            }
+            break;
+        case RADIO_STATE_APPLICATION:
+            switch (radio_state) {
+                case RADIO_STATE_BOOTLOADER:
+                    // Wrong state, disable radio
+                    enable_and_camera = false;
+                    boot_and_usb = true;
+                    radio_state = RADIO_STATE_OFF;
+                    break;
+                case RADIO_STATE_APPLICATION:
+                    // Target state reached, radio on and hopefully in application mode
+                    enable_and_camera = true;
+                    boot_and_usb = usb_otg_enable_target;
+                    break;
+                case RADIO_STATE_OFF:
+                default:
+                    // Radio is off, enable radio in application mode
+                    enable_and_camera = true;
+                    boot_and_usb = true;
+                    radio_state = RADIO_STATE_APPLICATION;
+                    break;
+            }
+            break;
+        case RADIO_STATE_OFF:
+        default:
+            radio_state = RADIO_STATE_OFF;
+            enable_and_camera = false;
+            boot_and_usb = usb_otg_enable_target;
+            break;
+    }
+
+    if (usb_otg_enable_state != usb_otg_enable_target) {
+        // Enable or disable PMIC OTG boost DC/DC converter
+        set_pmic_status(pmic_set_otg_enable(usb_otg_enable_target));
+        usb_otg_enable_state = usb_otg_enable_target;
+    }
+
+    funDigitalWrite(pin_c6_boot, boot_and_usb ? FUN_HIGH : FUN_LOW);
+    funDigitalWrite(pin_c6_enable, enable_and_camera ? FUN_HIGH : FUN_LOW);
+
+    #if HARDWARE_REV == 2
+        funDigitalWrite(pin_camera, camera_enable_target ? FUN_HIGH : FUN_LOW);
+    #endif
+}
+
 // Entry point
 int main() {
     SystemInit();
@@ -713,10 +803,6 @@ int main() {
     funDigitalWrite(pin_c6_enable, FUN_LOW);
     funPinMode(pin_c6_boot, GPIO_Speed_10MHz | GPIO_CNF_OUT_OD);
     funDigitalWrite(pin_c6_boot, FUN_HIGH);
-
-#if OVERRIDE_C6
-    funDigitalWrite(pin_c6_enable, FUN_HIGH);  // Turn on radio
-#endif
 
     // Display backlight
     timer3_init();  // Use timer 3 channel 1 as PWM output for controlling display backlight
@@ -819,11 +905,17 @@ int main() {
 
 #if HARDWARE_REV > 1
         static uint32_t pmic_previous = 0;
-        if (now - pmic_previous >= 500 * DELAY_MS_TIME) {
+        if (now - pmic_previous >= 1000 * DELAY_MS_TIME) {
             pmic_previous = now;
             pmic_task();
         }
 #endif
+
+        static uint32_t radio_previous = 0;
+        if (now - radio_previous >= 100 * DELAY_MS_TIME) {
+            radio_previous = now;
+            radio_task();
+        }
 
         funDigitalWrite(pin_interrupt,
                         (keyboard_interrupt | input_interrupt | pmic_interrupt)
