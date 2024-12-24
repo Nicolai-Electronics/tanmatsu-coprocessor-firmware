@@ -16,7 +16,7 @@ set(CMAKE_C_COMPILER "${PREFIX}gcc")
 set(CMAKE_CXX_COMPILER "${PREFIX}g++")
 set(CMAKE_OBJCOPY "${PREFIX}objcopy")
 
-set(RISCV_COMPILER_FLAGS "-g -Os -flto -ffunction-sections -fdata-sections -fmessage-length=0 -msmall-data-limit=8 -march=rv32imac -mabi=ilp32 -DCH32V20x=1 -static-libgcc -nostdlib -I. -Wall  -Wl,--print-memory-usage -lgcc -T \"${CMAKE_CURRENT_LIST_DIR}/platform/generated_CH32V203C8T6_.ld\" -Wl,--gc-sections")
+set(RISCV_COMPILER_FLAGS "-g -Os -flto -ffunction-sections -fdata-sections -fmessage-length=0 -msmall-data-limit=8 -march=rv32imac -mabi=ilp32 -DCH32V20x=1 -static-libgcc -nostdlib -I. -Wall  -Wl,--print-memory-usage -lgcc -T \"${CMAKE_CURRENT_BINARY_DIR}/platform/ch32v203c8.ld\" -Wl,--gc-sections")
 set(RISCV_COMPILER_FLAGS_DEBUG "")
 set(RISCV_COMPILER_FLAGS_RELEASE "")
 set(RISCV_LINKER_FLAGS "-Wl,--print-memory-usage -lgcc -Wl,--gc-sections")

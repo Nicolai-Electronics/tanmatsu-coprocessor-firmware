@@ -180,6 +180,24 @@ typedef enum {
     I2C_REG_ALARM_2,
     I2C_REG_ALARM_3,
     I2C_REG_PMIC_POWER_CONTROL,
+    I2C_REG_LED_DATA_LED0_G,
+    I2C_REG_LED_DATA_LED0_R,
+    I2C_REG_LED_DATA_LED0_B,
+    I2C_REG_LED_DATA_LED1_G,
+    I2C_REG_LED_DATA_LED1_R,
+    I2C_REG_LED_DATA_LED1_B,
+    I2C_REG_LED_DATA_LED2_G,
+    I2C_REG_LED_DATA_LED2_R,
+    I2C_REG_LED_DATA_LED2_B,
+    I2C_REG_LED_DATA_LED3_G,
+    I2C_REG_LED_DATA_LED3_R,
+    I2C_REG_LED_DATA_LED3_B,
+    I2C_REG_LED_DATA_LED4_G,
+    I2C_REG_LED_DATA_LED4_R,
+    I2C_REG_LED_DATA_LED4_B,
+    I2C_REG_LED_DATA_LED5_G,
+    I2C_REG_LED_DATA_LED5_R,
+    I2C_REG_LED_DATA_LED5_B,
     I2C_REG_LAST,  // End of list marker
 } i2c_register_t;
 
@@ -212,6 +230,10 @@ volatile bool usb_otg_enable_state = false;
 volatile bool usb_otg_enable_target = false;
 volatile bool camera_enable_target = false;
 
+// LEDs
+volatile uint8_t led_data[6 * 3] = {0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // Power LED is RED, other LEDs off
+volatile bool led_write_scheduled = true;
+
 // Interrupts
 void interrupt_update_reg(void) {
     i2c_registers[I2C_REG_INTERRUPT] =
@@ -242,6 +264,97 @@ void interrupt_clear(bool keyboard, bool input, bool pmic) {
         pmic_interrupt = false;
     }
     interrupt_update_reg();
+}
+
+// Addressable LEDs
+void write_addressable_leds() __attribute__((optimize("O0")));
+void write_addressable_leds() {
+    I2C1->CTLR2 &= ~(I2C_CTLR2_ITEVTEN); // Disable I2C event interrupt
+    for (uint8_t pos_byte = 0; pos_byte < sizeof(led_data); pos_byte++) {
+        for (int i = 7; i >= 0; i--) {
+            if ((led_data[pos_byte] >> i) & 1) {
+                // Send 1
+                GPIOA->BSHR |= 1 << (11);
+                // T1H: 0.6us
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                GPIOA->BSHR |= 1 << (11 + 16);
+                // T1L: 0.6us
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+            } else {
+                // Send 0
+                GPIOA->BSHR |= 1 << (11);
+                // T0H: 0.3us
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                GPIOA->BSHR |= 1 << (11 + 16);
+                // T0L: 0.9us
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
+            }
+        }
+    }
+    I2C1->CTLR2 |= I2C_CTLR2_ITEVTEN; // Enable I2C event interrupt
 }
 
 // Inputs
@@ -348,10 +461,21 @@ void set_pmic_status(pmic_result_t pmic_result) {
     }
 }
 
+void read_alarm(void) __attribute__((optimize("O0")));
+void read_alarm(void) {
+    uint32_t alarm = 0;
+    rtc_get_alarm(&alarm);
+    i2c_registers[I2C_REG_ALARM_0] = (alarm >> 0) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_1] = (alarm >> 8) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_2] = (alarm >> 16) & 0xFF;
+    i2c_registers[I2C_REG_ALARM_3] = (alarm >> 24) & 0xFF;
+}
+
 // I2C write callback
 void i2c_write_cb(uint8_t reg, uint8_t length) {
     static uint32_t new_rtc_value = 0;
     static uint32_t new_alarm_value = 0;
+    bool update_led_data = false;
 
     while (length > 0) {
         switch (reg) {
@@ -413,28 +537,48 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 break;
             case I2C_REG_ALARM_0:
                 new_alarm_value &= 0xFFFFFF00;
-                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_0];
+                new_alarm_value |= i2c_registers[I2C_REG_ALARM_0];
                 break;
             case I2C_REG_ALARM_1:
                 new_alarm_value &= 0xFFFF00FF;
-                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_1];
+                new_alarm_value |= i2c_registers[I2C_REG_ALARM_1] << 8;
                 break;
             case I2C_REG_ALARM_2:
                 new_alarm_value &= 0xFF00FFFF;
-                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_2];
+                new_alarm_value |= i2c_registers[I2C_REG_ALARM_2] << 16;
                 break;
             case I2C_REG_ALARM_3:
                 new_alarm_value &= 0x00FFFFFF;
-                new_alarm_value |= i2c_registers[I2C_REG_RTC_VALUE_3];
+                new_alarm_value |= i2c_registers[I2C_REG_ALARM_3] << 24;
                 rtc_set_alarm(new_alarm_value);
                 break;
             case I2C_REG_PMIC_POWER_CONTROL:
-                if (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] & 1) {
-                    // Enable alarm pin output if bit 2 is set
-                    rtc_configure_wakeup_pin(i2c_registers[I2C_REG_PMIC_POWER_CONTROL] & 2);
-                    // So long and thanks for all the fish
-                    pmic_power_off();
+                bool power_off = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 0) & 1;
+                bool enable_wakeup = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 1) & 1;
+                if (power_off) {
+                    rtc_configure_wakeup_pin(enable_wakeup); // Enable alarm pin output if bit 2 is set
+                    pmic_power_off(); // So long and thanks for all the fish
                 }
+                break;
+            case I2C_REG_LED_DATA_LED0_G:
+            case I2C_REG_LED_DATA_LED0_R:
+            case I2C_REG_LED_DATA_LED0_B:
+            case I2C_REG_LED_DATA_LED1_G:
+            case I2C_REG_LED_DATA_LED1_R:
+            case I2C_REG_LED_DATA_LED1_B:
+            case I2C_REG_LED_DATA_LED2_G:
+            case I2C_REG_LED_DATA_LED2_R:
+            case I2C_REG_LED_DATA_LED2_B:
+            case I2C_REG_LED_DATA_LED3_G:
+            case I2C_REG_LED_DATA_LED3_R:
+            case I2C_REG_LED_DATA_LED3_B:
+            case I2C_REG_LED_DATA_LED4_G:
+            case I2C_REG_LED_DATA_LED4_R:
+            case I2C_REG_LED_DATA_LED4_B:
+            case I2C_REG_LED_DATA_LED5_G:
+            case I2C_REG_LED_DATA_LED5_R:
+            case I2C_REG_LED_DATA_LED5_B:
+                update_led_data = true;
                 break;
             default:
                 if (reg >= I2C_REG_BACKUP_0 && reg <= I2C_REG_BACKUP_83) {
@@ -445,6 +589,13 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
         // Next register
         reg++;
         length--;
+    }
+
+    if (update_led_data) {
+        for (uint8_t i = 0; i < sizeof(led_data); i++) {
+            led_data[i] = i2c_registers[I2C_REG_LED_DATA_LED0_G + i];
+        }
+        led_write_scheduled = true;
     }
 }
 
@@ -844,12 +995,7 @@ int main() {
     bkp_read_all();
 
     // Read alarm setting
-    uint32_t alarm = 0;
-    rtc_get_alarm(&alarm);
-    i2c_registers[I2C_REG_ALARM_0] = (alarm >> 0) & 0xFF;
-    i2c_registers[I2C_REG_ALARM_1] = (alarm >> 8) & 0xFF;
-    i2c_registers[I2C_REG_ALARM_2] = (alarm >> 16) & 0xFF;
-    i2c_registers[I2C_REG_ALARM_3] = (alarm >> 24) & 0xFF;
+    read_alarm();
 
 #if HARDWARE_REV > 1
     bool power_button_latch = false;
@@ -926,6 +1072,11 @@ int main() {
         if (now - radio_previous >= 100 * DELAY_MS_TIME) {
             radio_previous = now;
             radio_task();
+        }
+
+        if (led_write_scheduled) {
+            led_write_scheduled = false;
+            write_addressable_leds();
         }
 
         funDigitalWrite(pin_interrupt,

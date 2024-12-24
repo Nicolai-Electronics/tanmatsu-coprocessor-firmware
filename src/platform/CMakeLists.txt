@@ -22,3 +22,6 @@ target_compile_definitions(platform
         CH32V20x=1
 
 )
+
+# Generate ld file
+execute_process(COMMAND ${CMAKE_C_COMPILER} -E -P -x c -DMCU_PACKAGE=1 -DTARGET_MCU_LD=2 ${CMAKE_CURRENT_LIST_DIR}/ch32v003fun.ld OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/ch32v203c8.ld OUTPUT_QUIET)
