@@ -15,10 +15,10 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 8
+#define FW_VERSION 10
 
 // Hardware version
-#define HARDWARE_REV 3  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
+#define HARDWARE_REV 2  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
 
 // Pins
 const uint8_t pin_c6_enable = PB8;
@@ -729,19 +729,25 @@ void pmic_task(void) {
         adc_active = false;
     }
 
+    // Read voltage on USB interface and power good status
+    uint16_t adc_vbus = 0;
+    pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
+
     // ADC: trigger new conversion
-    if (pmic_adc_trigger || prev_adc_contiuous != pmic_adc_continuous) {
-        res = pmic_set_adc_configuration(pmic_adc_trigger, prev_adc_contiuous);
+    if (pmic_adc_trigger || prev_adc_contiuous != pmic_adc_continuous || vbus_attached) {
+        res = pmic_set_adc_configuration(pmic_adc_trigger, pmic_adc_continuous || vbus_attached);
         if (res != PMIC_OK) {
             set_pmic_status(res);
             return;  // Stop on communication error
         }
-
-        pmic_adc_trigger = 0;
+        if (pmic_adc_trigger || pmic_adc_continuous || vbus_attached) {
+            adc_active = true;
+        }
         prev_adc_contiuous = pmic_adc_continuous;
-
-        adc_active = true;
+        pmic_adc_trigger = 0;
+        LockI2CSlave(true);
         i2c_registers[I2C_REG_PMIC_ADC_CONTROL] &= ~(1 << 0);  // Clear the trigger bit
+        LockI2CSlave(false);
     }
 
     // Battery detection
@@ -752,9 +758,6 @@ void pmic_task(void) {
         }
     }
 
-    // Read voltage on USB interface and power good status
-    uint16_t adc_vbus = 0;
-    pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
     LockI2CSlave(true);
     i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
     i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
