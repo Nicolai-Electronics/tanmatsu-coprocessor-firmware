@@ -15,10 +15,10 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 10
+#define FW_VERSION 2
 
 // Hardware version
-#define HARDWARE_REV 2  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
+#define HARDWARE_REV 4  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
 
 // Pins
 const uint8_t pin_c6_enable = PB8;
@@ -231,7 +231,7 @@ volatile bool usb_otg_enable_target = false;
 volatile bool camera_enable_target = false;
 
 // LEDs
-volatile uint8_t led_data[6 * 3] = {0,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // Power LED is RED, other LEDs off
+volatile uint8_t led_data[6 * 3] = {0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // Power LED is RED, other LEDs off
 volatile bool led_write_scheduled = true;
 
 // Interrupts
@@ -898,6 +898,8 @@ void radio_task() {
             break;
     }
 
+    write_addressable_leds();
+
     if (usb_otg_enable_state != usb_otg_enable_target) {
         // Enable or disable PMIC OTG boost DC/DC converter
         set_pmic_status(pmic_set_otg_enable(usb_otg_enable_target));
@@ -956,8 +958,12 @@ int main() {
     // ESP32-C6
     funPinMode(pin_c6_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_c6_enable, FUN_LOW);
+#if HARDWARE_REV >= 4
+    funPinMode(pin_c6_boot, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
+#else
     funPinMode(pin_c6_boot, GPIO_Speed_10MHz | GPIO_CNF_OUT_OD);
-    funDigitalWrite(pin_c6_boot, FUN_HIGH);
+#endif
+    funDigitalWrite(pin_c6_boot, FUN_LOW);
 
     // Display backlight
     timer3_init();  // Use timer 3 channel 1 as PWM output for controlling display backlight
