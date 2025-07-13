@@ -1,5 +1,5 @@
 // Tanmatsu coprocessor firmware
-// SPDX-FileCopyrightText: 2024 Nicolai Electronics
+// SPDX-FileCopyrightText: 2024-2025 Nicolai Electronics
 // SPDX-License-Identifier: MIT
 
 #include "pmic.h"
@@ -1356,15 +1356,17 @@ pmic_result_t pmic_get_adc_ichgr(uint16_t* out_ichgr) {
 
 pmic_result_t pmic_power_off() {
     pmic_result_t res;
-    res = pmic_get_watchdog_timer_limit(0);
+    res = pmic_get_watchdog_timer_limit(0);  // Disable watchdog timer
     if (res != PMIC_OK) return res;
-    res = pmic_set_adc_configuration(false, false);
+    res = pmic_set_adc_configuration(false, false);  // Disable ADC
     if (res != PMIC_OK) return res;
-    res = pmic_set_otg_enable(false);
+    res = pmic_set_otg_enable(false);  // Disable USB output
     if (res != PMIC_OK) return res;
-    res = pmic_set_battery_load_enable(false);
+    res = pmic_set_battery_load_enable(false);  // Disable testing load on battery
     if (res != PMIC_OK) return res;
-    res = pmic_set_battery_disconnect_enable(true);
+    res = pmic_set_battery_disconnect_enable(true);  // Disconnect battery
+    if (res != PMIC_OK) return res;
+    res = pmic_set_input_current_limit(0, false, true);  // Disconnect USB input
     return res;
 }
 

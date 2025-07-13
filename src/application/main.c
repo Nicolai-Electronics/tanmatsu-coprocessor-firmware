@@ -1,5 +1,5 @@
 // Tanmatsu coprocessor firmware
-// SPDX-FileCopyrightText: 2024 Nicolai Electronics
+// SPDX-FileCopyrightText: 2024-2025 Nicolai Electronics
 // SPDX-FileCopyrightText: 2024 Orange-Murker
 // SPDX-License-Identifier: MIT
 
@@ -8,41 +8,17 @@
 #include <stdio.h>
 #include <string.h>
 #include "ch32v003fun.h"
+#include "hardware.h"
 #include "i2c_master.h"
+#include "i2c_registers.h"
 #include "i2c_slave.h"
 #include "keyboard.h"
+#include "leds.h"
 #include "pmic.h"
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 2
-
-// Hardware version
-#define HARDWARE_REV 4  // 1 for prototype 1, 2 for prototype 2, 3 for prototype 3
-
-// Pins
-const uint8_t pin_c6_enable = PB8;
-const uint8_t pin_c6_boot = (HARDWARE_REV > 1 ? PD1 : PB9);
-const uint8_t pin_display_backlight = PB4;   // Note: change PWM timer configuration too when changing this pin
-const uint8_t pin_keyboard_backlight = PB3;  // Note: change PWM timer configuration too when changing this pin
-const uint8_t pin_interrupt = PA0;
-const uint8_t pin_sdcard_detect = PA15;
-const uint8_t pin_headphone_detect = PB5;
-const uint8_t pin_amplifier_enable = PD0;
-const uint8_t pin_power_out = PC13;  // Output to power button (for powering on using the RTC alarm)
-const uint8_t pin_sda = PB7;         // Uses hardware I2C peripheral
-const uint8_t pin_scl = PB6;         // Uses hardware I2C peripheral
-
-#if HARDWARE_REV > 1
-#if HARDWARE_REV > 2
-const uint8_t pin_led_data = PA11;
-#else
-const uint8_t pin_camera = PA11;
-#endif
-const uint8_t pin_power_in = PA12;  // Input from power button
-const uint8_t pin_pm_sda = PB11;
-const uint8_t pin_pm_scl = PB10;
-#endif
+#define FW_VERSION 4
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -50,165 +26,22 @@ const uint16_t timer3_pwm_cycle_width = 255;       // Amount of brightness steps
 static const uint32_t keyboard_scan_interval = 1;  // milliseconds (per row)
 static const uint32_t input_scan_interval = 50;    // milliseconds
 
-// I2C registers
-
-typedef enum {
-    I2C_REG_FW_VERSION_0 = 0,  // LSB
-    I2C_REG_FW_VERSION_1,      // MSB
-    I2C_REG_KEYBOARD_0,
-    I2C_REG_KEYBOARD_1,
-    I2C_REG_KEYBOARD_2,
-    I2C_REG_KEYBOARD_3,
-    I2C_REG_KEYBOARD_4,
-    I2C_REG_KEYBOARD_5,
-    I2C_REG_KEYBOARD_6,
-    I2C_REG_KEYBOARD_7,
-    I2C_REG_KEYBOARD_8,
-    I2C_REG_DISPLAY_BACKLIGHT,
-    I2C_REG_KEYBOARD_BACKLIGHT,
-    I2C_REG_INTERRUPT,
-    I2C_REG_RESERVED_0,
-    I2C_REG_INPUT,  // SD card detect (bit 0) & headphone detect (bit 1)
-    I2C_REG_OUTPUT,
-    I2C_REG_RADIO_CONTROL,
-    I2C_REG_RTC_VALUE_0,  // LSB
-    I2C_REG_RTC_VALUE_1,
-    I2C_REG_RTC_VALUE_2,
-    I2C_REG_RTC_VALUE_3,
-    I2C_REG_BACKUP_0,
-    I2C_REG_BACKUP_1,
-    I2C_REG_BACKUP_2,
-    I2C_REG_BACKUP_3,
-    I2C_REG_BACKUP_4,
-    I2C_REG_BACKUP_5,
-    I2C_REG_BACKUP_6,
-    I2C_REG_BACKUP_7,
-    I2C_REG_BACKUP_8,
-    I2C_REG_BACKUP_9,
-    I2C_REG_BACKUP_10,
-    I2C_REG_BACKUP_11,
-    I2C_REG_BACKUP_12,
-    I2C_REG_BACKUP_13,
-    I2C_REG_BACKUP_14,
-    I2C_REG_BACKUP_15,
-    I2C_REG_BACKUP_16,
-    I2C_REG_BACKUP_17,
-    I2C_REG_BACKUP_18,
-    I2C_REG_BACKUP_19,
-    I2C_REG_BACKUP_20,
-    I2C_REG_BACKUP_21,
-    I2C_REG_BACKUP_22,
-    I2C_REG_BACKUP_23,
-    I2C_REG_BACKUP_24,
-    I2C_REG_BACKUP_25,
-    I2C_REG_BACKUP_26,
-    I2C_REG_BACKUP_27,
-    I2C_REG_BACKUP_28,
-    I2C_REG_BACKUP_29,
-    I2C_REG_BACKUP_30,
-    I2C_REG_BACKUP_31,
-    I2C_REG_BACKUP_32,
-    I2C_REG_BACKUP_33,
-    I2C_REG_BACKUP_34,
-    I2C_REG_BACKUP_35,
-    I2C_REG_BACKUP_36,
-    I2C_REG_BACKUP_37,
-    I2C_REG_BACKUP_38,
-    I2C_REG_BACKUP_39,
-    I2C_REG_BACKUP_40,
-    I2C_REG_BACKUP_41,
-    I2C_REG_BACKUP_42,
-    I2C_REG_BACKUP_43,
-    I2C_REG_BACKUP_44,
-    I2C_REG_BACKUP_45,
-    I2C_REG_BACKUP_46,
-    I2C_REG_BACKUP_47,
-    I2C_REG_BACKUP_48,
-    I2C_REG_BACKUP_49,
-    I2C_REG_BACKUP_50,
-    I2C_REG_BACKUP_51,
-    I2C_REG_BACKUP_52,
-    I2C_REG_BACKUP_53,
-    I2C_REG_BACKUP_54,
-    I2C_REG_BACKUP_55,
-    I2C_REG_BACKUP_56,
-    I2C_REG_BACKUP_57,
-    I2C_REG_BACKUP_58,
-    I2C_REG_BACKUP_59,
-    I2C_REG_BACKUP_60,
-    I2C_REG_BACKUP_61,
-    I2C_REG_BACKUP_62,
-    I2C_REG_BACKUP_63,
-    I2C_REG_BACKUP_64,
-    I2C_REG_BACKUP_65,
-    I2C_REG_BACKUP_66,
-    I2C_REG_BACKUP_67,
-    I2C_REG_BACKUP_68,
-    I2C_REG_BACKUP_69,
-    I2C_REG_BACKUP_70,
-    I2C_REG_BACKUP_71,
-    I2C_REG_BACKUP_72,
-    I2C_REG_BACKUP_73,
-    I2C_REG_BACKUP_74,
-    I2C_REG_BACKUP_75,
-    I2C_REG_BACKUP_76,
-    I2C_REG_BACKUP_77,
-    I2C_REG_BACKUP_78,
-    I2C_REG_BACKUP_79,
-    I2C_REG_BACKUP_80,
-    I2C_REG_BACKUP_81,
-    I2C_REG_BACKUP_82,
-    I2C_REG_BACKUP_83,
-    I2C_REG_PMIC_COMM_FAULT,
-    I2C_REG_PMIC_FAULT,
-    I2C_REG_PMIC_ADC_CONTROL,
-    I2C_REG_PMIC_ADC_VBAT_0,   // LSB (value in mV)
-    I2C_REG_PMIC_ADC_VBAT_1,   // MSB
-    I2C_REG_PMIC_ADC_VSYS_0,   // LSB (value in mV)
-    I2C_REG_PMIC_ADC_VSYS_1,   // MSB
-    I2C_REG_PMIC_ADC_TS_0,     // LSB (In % of REGN)
-    I2C_REG_PMIC_ADC_TS_1,     // MSB
-    I2C_REG_PMIC_ADC_VBUS_0,   // LSB (value in mV)
-    I2C_REG_PMIC_ADC_VBUS_1,   // MSB
-    I2C_REG_PMIC_ADC_ICHGR_0,  // LSB (value in mA)
-    I2C_REG_PMIC_ADC_ICHGR_1,  // MSB
-    I2C_REG_PMIC_CHARGING_CONTROL,
-    I2C_REG_PMIC_CHARGING_STATUS,
-    I2C_REG_PMIC_OTG_CONTROL,
-    I2C_REG_ALARM_0,
-    I2C_REG_ALARM_1,
-    I2C_REG_ALARM_2,
-    I2C_REG_ALARM_3,
-    I2C_REG_PMIC_POWER_CONTROL,
-    I2C_REG_LED_DATA_LED0_G,
-    I2C_REG_LED_DATA_LED0_R,
-    I2C_REG_LED_DATA_LED0_B,
-    I2C_REG_LED_DATA_LED1_G,
-    I2C_REG_LED_DATA_LED1_R,
-    I2C_REG_LED_DATA_LED1_B,
-    I2C_REG_LED_DATA_LED2_G,
-    I2C_REG_LED_DATA_LED2_R,
-    I2C_REG_LED_DATA_LED2_B,
-    I2C_REG_LED_DATA_LED3_G,
-    I2C_REG_LED_DATA_LED3_R,
-    I2C_REG_LED_DATA_LED3_B,
-    I2C_REG_LED_DATA_LED4_G,
-    I2C_REG_LED_DATA_LED4_R,
-    I2C_REG_LED_DATA_LED4_B,
-    I2C_REG_LED_DATA_LED5_G,
-    I2C_REG_LED_DATA_LED5_R,
-    I2C_REG_LED_DATA_LED5_B,
-    I2C_REG_LAST,  // End of list marker
-} i2c_register_t;
-
 typedef enum {
     RADIO_STATE_OFF = 0,
-    RADIO_STATE_BOOTLOADER= 1,
+    RADIO_STATE_BOOTLOADER = 1,
     RADIO_STATE_APPLICATION = 2,
     RADIO_STATE_LAST,
 } radio_state_t;
 
-volatile uint8_t i2c_registers[I2C_REG_LAST];
+typedef enum {
+    POWER_STATE_UNINITIALIZED = 0,
+    PMIC_STATE_FAULT,
+    POWER_STATE_NO_BATTERY,
+    POWER_STATE_BATTERY,
+    POWER_STATE_CHARGING
+} power_state_t;
+
+volatile uint8_t i2c_registers[I2C_REG_LAST] = {0};
 
 // Interrupt flags
 volatile bool keyboard_interrupt = false;
@@ -217,7 +50,7 @@ volatile bool pmic_interrupt = false;
 
 // PMIC flags
 volatile bool pmic_adc_trigger = false;
-volatile bool pmic_adc_continuous = false;
+volatile bool pmic_adc_continuous = true;
 volatile bool pmic_force_disable_charging = false;
 volatile bool pmic_force_detect_battery = false;
 volatile uint16_t pmic_target_charging_current = 512;
@@ -230,9 +63,7 @@ volatile bool usb_otg_enable_state = false;
 volatile bool usb_otg_enable_target = false;
 volatile bool camera_enable_target = false;
 
-// LEDs
-volatile uint8_t led_data[6 * 3] = {0,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; // Power LED is RED, other LEDs off
-volatile bool led_write_scheduled = true;
+volatile power_state_t power_state = POWER_STATE_UNINITIALIZED;
 
 // Interrupts
 void interrupt_update_reg(void) {
@@ -266,108 +97,14 @@ void interrupt_clear(bool keyboard, bool input, bool pmic) {
     interrupt_update_reg();
 }
 
-// Addressable LEDs
-void write_addressable_leds() __attribute__((optimize("O0")));
-void write_addressable_leds() {
-    I2C1->CTLR2 &= ~(I2C_CTLR2_ITEVTEN); // Disable I2C event interrupt
-    for (uint8_t pos_byte = 0; pos_byte < sizeof(led_data); pos_byte++) {
-        for (int i = 7; i >= 0; i--) {
-            if ((led_data[pos_byte] >> i) & 1) {
-                // Send 1
-                GPIOA->BSHR |= 1 << (11);
-                // T1H: 0.6us
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                GPIOA->BSHR |= 1 << (11 + 16);
-                // T1L: 0.6us
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-            } else {
-                // Send 0
-                GPIOA->BSHR |= 1 << (11);
-                // T0H: 0.3us
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                GPIOA->BSHR |= 1 << (11 + 16);
-                // T0L: 0.9us
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-                __asm__("nop");__asm__("nop");__asm__("nop");__asm__("nop");
-            }
-        }
-    }
-    I2C1->CTLR2 |= I2C_CTLR2_ITEVTEN; // Enable I2C event interrupt
-}
-
 // Inputs
 bool input_step() {
-    static uint8_t previous_value = 0;
+    static uint8_t previous_value = 0xFF;
 
     uint8_t value = 0;
     value |= (!funDigitalRead(pin_sdcard_detect)) << 0;
     value |= funDigitalRead(pin_headphone_detect) << 1;
-
-#if HARDWARE_REV > 1
     value |= (!funDigitalRead(pin_power_in)) << 2;
-#endif
 
     i2c_registers[I2C_REG_INPUT] = value;
 
@@ -455,6 +192,7 @@ void set_pmic_status(pmic_result_t pmic_result) {
             // Generate interrupt
             interrupt_set(false, false, true);
         }
+        power_state = PMIC_STATE_FAULT;
     } else {
         // Clear bit 1 after a transaction has been completed succesfully
         i2c_registers[I2C_REG_PMIC_COMM_FAULT] &= ~(1 << 0);
@@ -556,8 +294,15 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 bool power_off = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 0) & 1;
                 bool enable_wakeup = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 1) & 1;
                 if (power_off) {
-                    rtc_configure_wakeup_pin(enable_wakeup); // Enable alarm pin output if bit 2 is set
-                    pmic_power_off(); // So long and thanks for all the fish
+                    timer2_set(0);
+                    timer3_set(0);
+                    rtc_configure_wakeup_pin(enable_wakeup);  // Enable alarm pin output if bit 2 is set
+                    for (uint8_t i = 0; i < 6; i++) {
+                        set_led_data(i, 0);  // Turn off all LEDs
+                    }
+                    write_addressable_leds();
+                    Delay_Ms(10);
+                    pmic_power_off();  // So long and thanks for all the fish
                 }
                 break;
             case I2C_REG_LED_DATA_LED0_G:
@@ -592,10 +337,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
     }
 
     if (update_led_data) {
-        for (uint8_t i = 0; i < sizeof(led_data); i++) {
-            led_data[i] = i2c_registers[I2C_REG_LED_DATA_LED0_G + i];
-        }
-        led_write_scheduled = true;
+        set_led_data_all(&i2c_registers[I2C_REG_LED_DATA_LED0_G]);
     }
 }
 
@@ -657,7 +399,7 @@ void pmic_task(void) {
     // Periodic task for controlling PMIC
     static uint8_t empty_battery_delay = 4;
     static uint8_t battery_redetect_timer = 0;
-    static bool prev_adc_contiuous = false;
+    static bool prev_adc_continuous = false;
     static bool adc_active = false;
     static bool prev_vbus_attached = false;
     static bool vbus_attached = false;
@@ -672,7 +414,9 @@ void pmic_task(void) {
     pmic_faults_t faults = {0};
     res = pmic_get_faults(&raw_faults, &faults);
     set_pmic_status(res);
-    if (res != PMIC_OK) return;  // Stop on communication error
+    if (res != PMIC_OK) {
+        return;  // Stop on communication error
+    }
     uint8_t prev_raw_faults = i2c_registers[I2C_REG_PMIC_FAULT];
     i2c_registers[I2C_REG_PMIC_FAULT] = raw_faults;
     if (prev_raw_faults != raw_faults) {
@@ -734,7 +478,7 @@ void pmic_task(void) {
     pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
 
     // ADC: trigger new conversion
-    if (pmic_adc_trigger || prev_adc_contiuous != pmic_adc_continuous || vbus_attached) {
+    if (pmic_adc_trigger || prev_adc_continuous != pmic_adc_continuous || vbus_attached) {
         res = pmic_set_adc_configuration(pmic_adc_trigger, pmic_adc_continuous || vbus_attached);
         if (res != PMIC_OK) {
             set_pmic_status(res);
@@ -743,7 +487,7 @@ void pmic_task(void) {
         if (pmic_adc_trigger || pmic_adc_continuous || vbus_attached) {
             adc_active = true;
         }
-        prev_adc_contiuous = pmic_adc_continuous;
+        prev_adc_continuous = pmic_adc_continuous;
         pmic_adc_trigger = 0;
         LockI2CSlave(true);
         i2c_registers[I2C_REG_PMIC_ADC_CONTROL] &= ~(1 << 0);  // Clear the trigger bit
@@ -834,6 +578,14 @@ void pmic_task(void) {
         (((uint8_t)(charge_status) & 3) << 3);  // Charge status is two bits, put at bits 3 and 4 of the register
 
     i2c_registers[I2C_REG_PMIC_CHARGING_STATUS] = charging_status;
+
+    if (!battery_attached) {
+        power_state = POWER_STATE_NO_BATTERY;
+    } else if (charge_status == PMIC_CHARGE_STATUS_NOT_CHARGING) {
+        power_state = POWER_STATE_BATTERY;
+    } else {
+        power_state = POWER_STATE_CHARGING;  // Should not happen
+    }
 }
 
 void radio_task() {
@@ -908,16 +660,65 @@ void radio_task() {
 
     funDigitalWrite(pin_c6_boot, boot_and_usb ? FUN_HIGH : FUN_LOW);
     funDigitalWrite(pin_c6_enable, enable_and_camera ? FUN_HIGH : FUN_LOW);
+}
 
-    #if HARDWARE_REV == 2
-        funDigitalWrite(pin_camera, camera_enable_target ? FUN_HIGH : FUN_LOW);
-    #endif
+void led_task(void) {
+    static power_state_t previous_power_state = POWER_STATE_UNINITIALIZED;
+    static radio_state_t previous_radio_state = RADIO_STATE_OFF;
+    static bool led_blink_state = false;
+
+    if (previous_power_state != power_state || power_state == PMIC_STATE_FAULT) {
+        previous_power_state = power_state;
+
+        switch (power_state) {
+            case PMIC_STATE_FAULT:
+                led_blink_state = !led_blink_state;
+                set_power_led(led_blink_state ? 0xFF0000 : 0x000000);
+                break;
+            case POWER_STATE_NO_BATTERY:
+                set_power_led(0xFF00FF);  // Magenta
+                break;
+            case POWER_STATE_BATTERY:
+                set_power_led(0x00FF00);  // Green
+                break;
+            case POWER_STATE_CHARGING:
+                set_power_led(0xFFFF00);  // Yellow
+                break;
+            default:
+            case POWER_STATE_UNINITIALIZED:
+                set_power_led(0xFFFFFF);  // White
+                break;
+        }
+    }
+
+    if (previous_radio_state != radio_target) {
+        previous_radio_state = radio_target;
+
+        switch (radio_state) {
+            case RADIO_STATE_OFF:
+                set_radio_led(0x000000);  // Off
+                break;
+            case RADIO_STATE_BOOTLOADER:
+                set_radio_led(0x0000FF);  // Blue
+                break;
+            case RADIO_STATE_APPLICATION:
+                set_radio_led(0x00FF00);  // Green
+                break;
+            default:
+                set_radio_led(0xFFFFFF);  // White
+                break;
+        }
+    }
 }
 
 // Entry point
 int main() {
     SystemInit();
     funGpioInitAll();
+
+    // Set version registers
+    i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
+    i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
 
     // Initialize keyboard
     keyboard_init();
@@ -928,7 +729,6 @@ int main() {
     SetupI2CSlave(0x5f, i2c_registers, sizeof(i2c_registers), i2c_write_cb, i2c_read_cb, false);
 
     // Initialize I2C master
-#if HARDWARE_REV > 1
     funPinMode(pin_pm_sda, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SDA
     funPinMode(pin_pm_scl, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SCL
     SetupI2CMaster();
@@ -953,16 +753,11 @@ int main() {
     pmic_configure_battery_charger(true, 512);  // Battery attached and charge at 512mA
 
     pmic_set_otg_enable(true);  // Enable OTG booster (for testing)
-#endif
 
     // ESP32-C6
     funPinMode(pin_c6_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_c6_enable, FUN_LOW);
-#if HARDWARE_REV >= 4
     funPinMode(pin_c6_boot, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
-#else
-    funPinMode(pin_c6_boot, GPIO_Speed_10MHz | GPIO_CNF_OUT_OD);
-#endif
     funDigitalWrite(pin_c6_boot, FUN_LOW);
 
     // Display backlight
@@ -983,19 +778,12 @@ int main() {
 
     // Amplifier enable
     AFIO->PCFR1 |= AFIO_PCFR1_PD01_REMAP;
-
     funPinMode(pin_amplifier_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_amplifier_enable, FUN_LOW);
 
-#if HARDWARE_REV == 2
-    funPinMode(pin_camera, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
-    funDigitalWrite(pin_camera, FUN_LOW);
-#endif
-
-#if HARDWARE_REV > 2
+    // LED data
     funPinMode(pin_led_data, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_led_data, FUN_LOW);
-#endif
 
     // Real time clock
     rtc_init();
@@ -1006,16 +794,15 @@ int main() {
     // Read alarm setting
     read_alarm();
 
-#if HARDWARE_REV > 1
     bool power_button_latch = false;
     uint8_t power_button_counter = 0;
-#endif
 
     while (1) {
+        uint32_t now = SysTick->CNT;
+
+        // Set version registers
         i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
         i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
-
-        uint32_t now = SysTick->CNT;
 
         static uint32_t keyboard_scan_previous = 0;
         if (now - keyboard_scan_previous >= keyboard_scan_interval * DELAY_MS_TIME) {
@@ -1035,17 +822,30 @@ int main() {
                 interrupt_set(false, true, false);
             }
 
-#if HARDWARE_REV > 1
             if (!funDigitalRead(pin_power_in)) {
                 if (power_button_latch && power_button_counter > 500 / input_scan_interval) {
+                    timer2_set(0);
+                    timer3_set(0);
+                    for (uint8_t i = 0; i < 6; i++) {
+                        set_led_data(i, 0);  // Turn off all LEDs
+                    }
+                    write_addressable_leds();
+                    Delay_Ms(10);
                     pmic_power_off();
+                }
+                if (power_button_counter == 0) {
+                    set_led_data(3, 0xFF0000);  // LED next to power button: red
+                    write_addressable_leds();
                 }
                 power_button_counter++;
             } else {
+                if (power_button_counter > 0) {
+                    set_led_data(3, 0x000000);  // LED next to power button: off
+                    write_addressable_leds();
+                }
                 power_button_latch = true;
                 power_button_counter = 0;
             }
-#endif
         }
 
         static uint32_t rtc_previous = 0;
@@ -1060,33 +860,25 @@ int main() {
             LockI2CSlave(false);
         }
 
-        /*static uint32_t bl_previous = 0;
-        if (now - bl_previous >= 20 * DELAY_MS_TIME) {
-            bl_previous = now;
-            if (backlight_fade_value < timer3_pwm_cycle_width) {
-                timer3_set(backlight_fade_value);
-                backlight_fade_value++;
-            }
-        }*/
-
-#if HARDWARE_REV > 1
-        static uint32_t pmic_previous = 0;
-        if (now - pmic_previous >= 1000 * DELAY_MS_TIME) {
+        static uint32_t pmic_previous = 250 * DELAY_MS_TIME;
+        if (now - pmic_previous >= 250 * DELAY_MS_TIME) {
             pmic_previous = now;
             pmic_task();
         }
-#endif
 
         static uint32_t radio_previous = 0;
-        if (now - radio_previous >= 100 * DELAY_MS_TIME) {
+        if (now - radio_previous >= 50 * DELAY_MS_TIME) {
             radio_previous = now;
             radio_task();
         }
 
-        if (led_write_scheduled) {
-            led_write_scheduled = false;
-            write_addressable_leds();
+        static uint32_t led_previous = 0;
+        if (now - led_previous >= 250 * DELAY_MS_TIME) {
+            led_previous = now;
+            led_task();
         }
+
+        write_addressable_leds();
 
         funDigitalWrite(pin_interrupt,
                         (keyboard_interrupt | input_interrupt | pmic_interrupt)
