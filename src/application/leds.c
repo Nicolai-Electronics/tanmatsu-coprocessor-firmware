@@ -4,12 +4,23 @@
 
 volatile uint8_t led_data[6 * 3] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 volatile bool leds_need_update = true;
+volatile uint8_t* registers;
 
-void set_led_data_all(uint8_t* source) {
+void leds_init(uint8_t* led_registers) {
+    registers = led_registers;
+}
+
+void set_led_data_all() {
     for (uint8_t i = 0; i < sizeof(led_data); i++) {
-        led_data[i] = source[i];
+        led_data[i] = registers[i];
     }
     leds_need_update = true;
+}
+
+void led_data_sync_back() {
+    for (uint8_t i = 0; i < sizeof(led_data); i++) {
+        registers[i] = led_data[i];
+    }
 }
 
 void set_led_data(uint8_t led_index, uint32_t color) {
@@ -19,6 +30,7 @@ void set_led_data(uint8_t led_index, uint32_t color) {
         led_data[led_index * 3 + 2] = (color >> 0) & 0xFF;   // Blue
     }
     leds_need_update = true;
+    led_data_sync_back();
 }
 
 void set_power_led(uint32_t color) {
