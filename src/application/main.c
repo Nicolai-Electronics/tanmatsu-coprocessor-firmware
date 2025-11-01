@@ -337,7 +337,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
     }
 
     if (update_led_data) {
-        set_led_data_all(&i2c_registers[I2C_REG_LED_DATA_LED0_G]);
+        set_led_data_all();
     }
 }
 
@@ -784,6 +784,7 @@ int main() {
     // LED data
     funPinMode(pin_led_data, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_led_data, FUN_LOW);
+    leds_init(&i2c_registers[I2C_REG_LED_DATA_LED0_G]);
 
     // Real time clock
     rtc_init();
