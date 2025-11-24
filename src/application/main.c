@@ -18,7 +18,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 4
+#define FW_VERSION 5
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -64,6 +64,8 @@ volatile bool usb_otg_enable_target = false;
 volatile bool camera_enable_target = false;
 
 volatile power_state_t power_state = POWER_STATE_UNINITIALIZED;
+
+volatile uint8_t message_state = 0;
 
 // Interrupts
 void interrupt_update_reg(void) {
@@ -224,6 +226,9 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
             case I2C_REG_KEYBOARD_BACKLIGHT:
                 timer2_set(i2c_registers[I2C_REG_KEYBOARD_BACKLIGHT]);
                 break;
+            case I2C_REG_LED_BRIGHTNESS:
+                set_led_brightness(i2c_registers[I2C_REG_LED_BRIGHTNESS]);
+                break;
             case I2C_REG_OUTPUT:
                 funDigitalWrite(pin_amplifier_enable, i2c_registers[I2C_REG_OUTPUT] & 1);
                 camera_enable_target = (i2c_registers[I2C_REG_OUTPUT] >> 1) & 1;
@@ -298,7 +303,8 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                     timer3_set(0);
                     rtc_configure_wakeup_pin(enable_wakeup);  // Enable alarm pin output if bit 2 is set
                     for (uint8_t i = 0; i < 6; i++) {
-                        set_led_data(i, 0);  // Turn off all LEDs
+                        set_led_data(i, 0, false);  // Turn off all LEDs
+                        set_led_data(i, 0, true);   // Turn off all LEDs
                     }
                     write_addressable_leds();
                     Delay_Ms(10);
@@ -325,6 +331,12 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
             case I2C_REG_LED_DATA_LED5_B:
                 update_led_data = true;
                 break;
+            case I2C_REG_LED_MODE:
+                set_led_mode(i2c_registers[I2C_REG_LED_MODE]);
+                break;
+            case I2C_REG_MESSAGE:
+                message_state = i2c_registers[I2C_REG_MESSAGE];
+                break;
             default:
                 if (reg >= I2C_REG_BACKUP_0 && reg <= I2C_REG_BACKUP_83) {
                     bkp_write_byte(reg - I2C_REG_BACKUP_0, i2c_registers[reg]);
@@ -337,7 +349,7 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
     }
 
     if (update_led_data) {
-        set_led_data_all(&i2c_registers[I2C_REG_LED_DATA_LED0_G]);
+        set_led_data_all((uint8_t*)&i2c_registers[I2C_REG_LED_DATA_LED0_G], false);
     }
 }
 
@@ -663,51 +675,100 @@ void radio_task() {
 }
 
 void led_task(void) {
-    static power_state_t previous_power_state = POWER_STATE_UNINITIALIZED;
-    static radio_state_t previous_radio_state = RADIO_STATE_OFF;
     static bool led_blink_state = false;
+    static uint8_t message_fade_step = 0;
+    static bool message_fade_init = false;
+    static bool message_fade_direction = false;
 
-    if (previous_power_state != power_state || power_state == PMIC_STATE_FAULT) {
-        previous_power_state = power_state;
-
-        switch (power_state) {
-            case PMIC_STATE_FAULT:
-                led_blink_state = !led_blink_state;
-                set_power_led(led_blink_state ? 0xFF0000 : 0x000000);
-                break;
-            case POWER_STATE_NO_BATTERY:
-                set_power_led(0xFF00FF);  // Magenta
-                break;
-            case POWER_STATE_BATTERY:
-                set_power_led(0x00FF00);  // Green
-                break;
-            case POWER_STATE_CHARGING:
-                set_power_led(0xFFFF00);  // Yellow
-                break;
-            default:
-            case POWER_STATE_UNINITIALIZED:
-                set_power_led(0xFFFFFF);  // White
-                break;
-        }
+    switch (power_state) {
+        case PMIC_STATE_FAULT:
+            led_blink_state = !led_blink_state;
+            set_power_led(led_blink_state ? 0xFF0000 : 0x000000);
+            break;
+        case POWER_STATE_NO_BATTERY:
+            set_power_led(0xFF00FF);  // Magenta
+            break;
+        case POWER_STATE_BATTERY:
+            set_power_led(0x00FF00);  // Green
+            break;
+        case POWER_STATE_CHARGING:
+            set_power_led(0xFFFF00);  // Yellow
+            break;
+        default:
+        case POWER_STATE_UNINITIALIZED:
+            set_power_led(0xFFFFFF);  // White
+            break;
     }
 
-    if (previous_radio_state != radio_target) {
-        previous_radio_state = radio_target;
+    switch (radio_state) {
+        case RADIO_STATE_OFF:
+            set_radio_led(0x000000);  // Off
+            break;
+        case RADIO_STATE_BOOTLOADER:
+            set_radio_led(0x0000FF);  // Blue
+            break;
+        case RADIO_STATE_APPLICATION:
+            set_radio_led(0x00FF00);  // Green
+            break;
+        default:
+            set_radio_led(0xFFFFFF);  // White
+            break;
+    }
 
-        switch (radio_state) {
-            case RADIO_STATE_OFF:
-                set_radio_led(0x000000);  // Off
-                break;
-            case RADIO_STATE_BOOTLOADER:
-                set_radio_led(0x0000FF);  // Blue
-                break;
-            case RADIO_STATE_APPLICATION:
-                set_radio_led(0x00FF00);  // Green
-                break;
-            default:
-                set_radio_led(0xFFFFFF);  // White
-                break;
+    // Message LED
+    uint32_t message_color_a = 0;
+    if (message_state & 0x01) message_color_a |= 0xFF0000;
+    if (message_state & 0x02) message_color_a |= 0x00FF00;
+    if (message_state & 0x04) message_color_a |= 0x0000FF;
+    uint32_t message_color_b = 0;
+    if (message_state & 0x10) message_color_b |= 0xFF0000;
+    if (message_state & 0x20) message_color_b |= 0x00FF00;
+    if (message_state & 0x40) message_color_b |= 0x0000FF;
+    bool message_fade = message_state & 0x08;
+    bool message_fade_hold = message_state & 0x80;
+
+    if (message_fade) {
+        if (message_fade_init) {
+            message_color_b = 0;
         }
+        if (!message_fade_direction) {
+            if (message_fade_step >= 10) {
+                message_fade_direction = true;
+                message_fade_init = false;
+            } else {
+                message_fade_step++;
+            }
+        } else {
+            if (message_fade_step < 1) {
+                if (!message_fade_hold) {
+                    message_fade_direction = false;
+                }
+            } else {
+                message_fade_step--;
+            }
+        }
+
+        uint32_t combined_color = (((((message_color_a >> 16) & 0xFF) * message_fade_step) +
+                                    (((message_color_b >> 16) & 0xFF) * (10 - message_fade_step))) /
+                                   10)
+                                  << 16;
+        combined_color |= (((((message_color_a >> 8) & 0xFF) * message_fade_step) +
+                            (((message_color_b >> 8) & 0xFF) * (10 - message_fade_step))) /
+                           10)
+                          << 8;
+        combined_color |= (((((message_color_a >> 0) & 0xFF) * message_fade_step) +
+                            (((message_color_b >> 0) & 0xFF) * (10 - message_fade_step))) /
+                           10)
+                          << 0;
+        set_message_led(combined_color);
+    } else {
+        // Static color
+        set_message_led(message_color_a);
+
+        // Reset fade state
+        message_fade_step = 0;
+        message_fade_init = true;
+        message_fade_direction = false;
     }
 }
 
@@ -719,6 +780,11 @@ int main() {
     // Set version registers
     i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
     i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
+
+    // Set other default values
+    i2c_registers[I2C_REG_DISPLAY_BACKLIGHT] = 255;  // Full brightness
+    i2c_registers[I2C_REG_LED_BRIGHTNESS] = 255;     // Full brightness
+    i2c_registers[I2C_REG_LED_MODE] = 1;             // Automatic LED mode
 
     // Initialize keyboard
     keyboard_init();
@@ -827,20 +893,21 @@ int main() {
                     timer2_set(0);
                     timer3_set(0);
                     for (uint8_t i = 0; i < 6; i++) {
-                        set_led_data(i, 0);  // Turn off all LEDs
+                        set_led_data(i, 0, false);  // Turn off all LEDs
+                        set_led_data(i, 0, true);   // Turn off all LEDs
                     }
                     write_addressable_leds();
                     Delay_Ms(10);
                     pmic_power_off();
                 }
                 if (power_button_counter == 0) {
-                    set_led_data(3, 0xFF0000);  // LED next to power button: red
+                    set_powerbutton_led(0xFF0000);  // LED next to power button: red
                     write_addressable_leds();
                 }
                 power_button_counter++;
             } else {
                 if (power_button_counter > 0) {
-                    set_led_data(3, 0x000000);  // LED next to power button: off
+                    set_powerbutton_led(0x000000);  // LED next to power button: off
                     write_addressable_leds();
                 }
                 power_button_latch = true;

@@ -15,7 +15,7 @@ typedef enum {
     I2C_REG_DISPLAY_BACKLIGHT,
     I2C_REG_KEYBOARD_BACKLIGHT,
     I2C_REG_INTERRUPT,
-    I2C_REG_RESERVED_0,
+    I2C_REG_LED_BRIGHTNESS,
     I2C_REG_INPUT,  // SD card detect (bit 0) & headphone detect (bit 1)
     I2C_REG_OUTPUT,
     I2C_REG_RADIO_CONTROL,
@@ -146,5 +146,7 @@ typedef enum {
     I2C_REG_LED_DATA_LED5_G,
     I2C_REG_LED_DATA_LED5_R,
     I2C_REG_LED_DATA_LED5_B,
+    I2C_REG_LED_MODE,
+    I2C_REG_MESSAGE,
     I2C_REG_LAST,  // End of list marker
 } i2c_register_t;
