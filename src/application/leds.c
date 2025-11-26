@@ -1,3 +1,4 @@
+#include "leds.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -57,10 +58,12 @@ void set_powerbutton_led(uint32_t color) {
 
 void set_led_brightness(uint8_t brightness) {
     led_brightness = brightness;
+    leds_need_update = true;
 }
 
 void set_led_mode(uint8_t mode) {
     led_automatic_control = mode & 1;
+    leds_need_update = true;
 }
 
 void write_addressable_leds(void) __attribute__((optimize("O0")));
