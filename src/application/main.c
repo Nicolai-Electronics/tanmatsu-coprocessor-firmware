@@ -18,7 +18,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 5
+#define FW_VERSION 6
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -402,9 +402,8 @@ void bkp_read_all(void) {
 }
 
 void configure_usb_input(void) {
-    pmic_set_input_current_limit(3000, false, false);  // Allow up to 2000mA to be sourced from the USB-C port
-    // pmic_set_input_current_optimizer(true);           // Reduce current if supply insufficient for 2000mA
-    pmic_set_input_current_optimizer(false);  // Take 2000mA regardless of the charger (workaround)
+    pmic_set_input_current_limit(2000, false, false);  // Allow up to 2000mA to be sourced from the USB-C port
+    pmic_set_input_current_optimizer(true);            // Reduce current if supply insufficient for 2000mA
 }
 
 void pmic_task(void) {
