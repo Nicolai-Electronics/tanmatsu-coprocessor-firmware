@@ -18,7 +18,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 6
+#define FW_VERSION 7
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -168,7 +168,7 @@ void timer3_init() {
     RCC->APB1PRSTR |= RCC_APB1Periph_TIM3;
     RCC->APB1PRSTR &= ~RCC_APB1Periph_TIM3;
 
-    TIM3->PSC = 0x10;                      // Clock prescaler divider
+    TIM3->PSC = 0x10;                      // Clock prescaler divider (set to 0x04?)
     TIM3->ATRLR = timer3_pwm_cycle_width;  // Total PWM cycle width
 
     TIM3->CHCTLR1 |= TIM_OC1M_2 | TIM_OC1M_1 | TIM_OC1PE;  // Enable channel 1
@@ -846,9 +846,8 @@ int main() {
     funPinMode(pin_amplifier_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
     funDigitalWrite(pin_amplifier_enable, FUN_LOW);
 
-    // LED data
-    funPinMode(pin_led_data, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
-    funDigitalWrite(pin_led_data, FUN_LOW);
+    // Addressable LEDs
+    led_init();
 
     // Real time clock
     rtc_init();
