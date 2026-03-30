@@ -18,7 +18,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 7
+#define FW_VERSION 8
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -99,6 +99,10 @@ void interrupt_clear(bool keyboard, bool input, bool pmic) {
     interrupt_update_reg();
 }
 
+// Audio amplifier
+static bool amplifier_requested = false;
+static bool amplifier_force = false;
+
 // Inputs
 bool input_step() {
     static uint8_t previous_value = 0xFF;
@@ -109,6 +113,9 @@ bool input_step() {
     value |= (!funDigitalRead(pin_power_in)) << 2;
 
     i2c_registers[I2C_REG_INPUT] = value;
+
+    bool headphone_connected = value & (1 << 1);
+    funDigitalWrite(pin_amplifier_enable, amplifier_requested && (amplifier_force || !headphone_connected));
 
     bool changed = previous_value != value;
     previous_value = value;
@@ -230,8 +237,9 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 set_led_brightness(i2c_registers[I2C_REG_LED_BRIGHTNESS]);
                 break;
             case I2C_REG_OUTPUT:
-                funDigitalWrite(pin_amplifier_enable, i2c_registers[I2C_REG_OUTPUT] & 1);
+                amplifier_requested = i2c_registers[I2C_REG_OUTPUT] & 1;
                 camera_enable_target = (i2c_registers[I2C_REG_OUTPUT] >> 1) & 1;
+                amplifier_force = (i2c_registers[I2C_REG_OUTPUT] >> 2) & 1;
                 break;
             case I2C_REG_RADIO_CONTROL:
                 radio_target = i2c_registers[I2C_REG_RADIO_CONTROL];
