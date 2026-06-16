@@ -148,5 +148,6 @@ typedef enum {
     I2C_REG_LED_DATA_LED5_B,
     I2C_REG_LED_MODE,
     I2C_REG_MESSAGE,
+    I2C_REG_DEBUG,
     I2C_REG_LAST,  // End of list marker
 } i2c_register_t;

@@ -59,6 +59,8 @@ pmic_result_t pmic_set_boost_mode_temperature_monitor_thresholds(bool cold, pmic
 pmic_result_t pmic_get_boost_mode_temperature_monitor_thresholds(bool* out_cold, pmic_bhot_t* out_hot);
 
 // REG02
+pmic_result_t pmic_set_vbus_detection_mode(bool auto_dpdm_en, bool force_dpdm);
+pmic_result_t pmic_get_vbus_detection_mode(bool* auto_dpdm_en, bool* force_dpdm);
 pmic_result_t pmic_set_otg_boost_frequency(bool low_frequency);
 pmic_result_t pmic_get_otg_boost_frequency(bool* out_low_frequency);
 pmic_result_t pmic_set_input_current_optimizer(bool enable);

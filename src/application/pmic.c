@@ -124,6 +124,28 @@ pmic_result_t pmic_get_boost_mode_temperature_monitor_thresholds(bool* out_cold,
 }
 
 // REG02
+pmic_result_t pmic_set_vbus_detection_mode(bool auto_dpdm_en, bool force_dpdm) {
+    bq25895_reg02_t value;
+    pmic_result_t res = pmic_read_reg(0x02, &value.raw);
+    if (res != PMIC_OK) return res;
+    value.auto_dpdm_en = auto_dpdm_en;
+    value.force_dpdm = force_dpdm;
+    return pmic_write_reg(0x02, value.raw);
+}
+
+pmic_result_t pmic_get_vbus_detection_mode(bool* auto_dpdm_en, bool* force_dpdm) {
+    bq25895_reg02_t value;
+    pmic_result_t res = pmic_read_reg(0x02, &value.raw);
+    if (res != PMIC_OK) return res;
+    if (auto_dpdm_en) {
+        *auto_dpdm_en = value.auto_dpdm_en;
+    }
+    if (force_dpdm) {
+        *force_dpdm = value.force_dpdm;
+    }
+    return PMIC_OK;
+}
+
 pmic_result_t pmic_set_otg_boost_frequency(bool low_frequency) {
     // Low frequency: 500kHz, high frequency: 1.5MHz
     bq25895_reg02_t value;
@@ -1429,7 +1451,7 @@ pmic_result_t pmic_configure_battery_charger(bool enable, uint16_t current) {
     if (enable) {
         res = pmic_set_charge_enable(true);  // Start charging
         if (res != PMIC_OK) return res;
-        res = pmic_set_charge_battery_precharge_threshold_3v(true);  // Switch from precharge to fast charge at 3v
+        res = pmic_set_charge_battery_precharge_threshold_3v(false);  // Switch from precharge to fast charge at 2.8v
         if (res != PMIC_OK) return res;
         res = pmic_set_charge_recharge_threshold_200mv_offset(
             false);  // Recharge when battery voltage is 100mV below target

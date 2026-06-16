@@ -1,8 +1,9 @@
 // Tanmatsu coprocessor firmware
-// SPDX-FileCopyrightText: 2024-2025 Nicolai Electronics
+// SPDX-FileCopyrightText: 2024-2026 Nicolai Electronics
 // SPDX-FileCopyrightText: 2024 Orange-Murker
 // SPDX-License-Identifier: MIT
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,7 +19,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 8
+#define FW_VERSION 9
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -49,8 +50,6 @@ volatile bool input_interrupt = false;
 volatile bool pmic_interrupt = false;
 
 // PMIC flags
-volatile bool pmic_adc_trigger = false;
-volatile bool pmic_adc_continuous = true;
 volatile bool pmic_force_disable_charging = false;
 volatile bool pmic_force_detect_battery = false;
 volatile uint16_t pmic_target_charging_current = 512;
@@ -66,6 +65,33 @@ volatile bool camera_enable_target = false;
 volatile power_state_t power_state = POWER_STATE_UNINITIALIZED;
 
 volatile uint8_t message_state = 0;
+
+char debug_buffer[1024] = {0};
+uint32_t debug_write_offset = 0;
+uint32_t debug_read_offset = 0;
+
+int putchar(int c) {
+    uint32_t next = (debug_write_offset + 1) % sizeof(debug_buffer);
+    if (next == debug_read_offset) {
+        return 0;
+    }
+    debug_buffer[debug_write_offset] = (char)c;
+    debug_write_offset = next;
+    return c;
+}
+
+char get_debug_char(void) {
+    if (debug_read_offset == debug_write_offset) {
+        return 0;
+    }
+    char c = debug_buffer[debug_read_offset];
+    debug_read_offset = (debug_read_offset + 1) % sizeof(debug_buffer);
+    return c;
+}
+
+uint32_t get_debug_available(void) {
+    return (debug_write_offset - debug_read_offset + sizeof(debug_buffer)) % sizeof(debug_buffer);
+}
 
 // Interrupts
 void interrupt_update_reg(void) {
@@ -265,8 +291,9 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 rtc_set_counter(new_rtc_value);
                 break;
             case I2C_REG_PMIC_ADC_CONTROL: {
-                pmic_adc_trigger = i2c_registers[I2C_REG_PMIC_ADC_CONTROL] & 1;
-                pmic_adc_continuous = (i2c_registers[I2C_REG_PMIC_ADC_CONTROL] & 2) >> 1;
+                // The ADC is now always enabled, the first two bits of ADC control are now deprecated
+                // pmic_adc_trigger = i2c_registers[I2C_REG_PMIC_ADC_CONTROL] & 1;
+                // pmic_adc_continuous = (i2c_registers[I2C_REG_PMIC_ADC_CONTROL] & 2) >> 1;
                 break;
             }
             case I2C_REG_PMIC_CHARGING_CONTROL: {
@@ -396,6 +423,9 @@ void i2c_read_cb(uint8_t reg) {
         case I2C_REG_PMIC_ADC_ICHGR_1:
             interrupt_clear(false, false, true);  // Clear PMIC interrupt flag
             break;
+        case I2C_REG_DEBUG:
+            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
+            break;
         default:
             break;
     }
@@ -410,6 +440,9 @@ void bkp_read_all(void) {
 }
 
 void configure_usb_input(void) {
+    pmic_set_vbus_detection_mode(false, false);
+    pmic_set_maxcharge(false);
+    pmic_set_high_voltage_dcp(false);
     pmic_set_input_current_limit(2000, false, false);  // Allow up to 2000mA to be sourced from the USB-C port
     pmic_set_input_current_optimizer(true);            // Reduce current if supply insufficient for 2000mA
 }
@@ -418,8 +451,6 @@ void pmic_task(void) {
     // Periodic task for controlling PMIC
     static uint8_t empty_battery_delay = 4;
     static uint8_t battery_redetect_timer = 0;
-    static bool prev_adc_continuous = false;
-    static bool adc_active = false;
     static bool prev_vbus_attached = false;
     static bool vbus_attached = false;
     static bool battery_attached = true;
@@ -427,6 +458,10 @@ void pmic_task(void) {
     static uint16_t prev_pmic_target_charging_current = 0;
 
     pmic_result_t res;
+
+    // Configure
+    configure_usb_input();
+    pmic_set_adc_configuration(false, true);
 
     // Fault reporting
     uint8_t raw_faults = 0;
@@ -442,76 +477,51 @@ void pmic_task(void) {
         interrupt_set(false, false, true);
     }
 
-    // ADC: process previous conversion
-    if (adc_active || pmic_adc_continuous) {
-        uint16_t adc_vbat = 0;
-        res = pmic_get_adc_vbat(&adc_vbat, NULL);
-        if (res != PMIC_OK) {
-            set_pmic_status(res);
-            return;  // Stop on communication error
-        }
+    // ADC
+    uint16_t adc_vbat = 0;
+    res = pmic_get_adc_vbat(&adc_vbat, NULL);
+    if (res != PMIC_OK) {
+        set_pmic_status(res);
+        return;  // Stop on communication error
+    }
 
-        uint16_t adc_vsys = 0;
-        res = pmic_get_adc_vsys(&adc_vsys);
-        if (res != PMIC_OK) {
-            set_pmic_status(res);
-            return;  // Stop on communication error
-        }
+    uint16_t adc_vsys = 0;
+    res = pmic_get_adc_vsys(&adc_vsys);
+    if (res != PMIC_OK) {
+        set_pmic_status(res);
+        return;  // Stop on communication error
+    }
 
-        uint16_t adc_tspct = 0;
-        res = pmic_get_adc_tspct(&adc_tspct);
-        if (res != PMIC_OK) {
-            set_pmic_status(res);
-            return;  // Stop on communication error
-        }
+    uint16_t adc_tspct = 0;
+    res = pmic_get_adc_tspct(&adc_tspct);
+    if (res != PMIC_OK) {
+        set_pmic_status(res);
+        return;  // Stop on communication error
+    }
 
-        uint16_t adc_ichgr = 0;
-        res = pmic_get_adc_ichgr(&adc_ichgr);
-        if (res != PMIC_OK) {
-            set_pmic_status(res);
-            return;  // Stop on communication error
-        }
-
-        LockI2CSlave(true);
-        i2c_registers[I2C_REG_PMIC_ADC_VBAT_0] = adc_vbat & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_VBAT_1] = (adc_vbat >> 8) & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_VSYS_0] = adc_vsys & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_VSYS_1] = (adc_vsys >> 8) & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_TS_0] = adc_tspct & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_TS_1] = (adc_tspct >> 8) & 0xFF;
-        // i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
-        // i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_ICHGR_0] = adc_ichgr & 0xFF;
-        i2c_registers[I2C_REG_PMIC_ADC_ICHGR_1] = (adc_ichgr >> 8) & 0xFF;
-        LockI2CSlave(false);
-
-        if (adc_active) {
-            interrupt_set(false, false, true);
-        }
-
-        adc_active = false;
+    uint16_t adc_ichgr = 0;
+    res = pmic_get_adc_ichgr(&adc_ichgr);
+    if (res != PMIC_OK) {
+        set_pmic_status(res);
+        return;  // Stop on communication error
     }
 
     // Read voltage on USB interface and power good status
     uint16_t adc_vbus = 0;
     pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
 
-    // ADC: trigger new conversion
-    if (pmic_adc_trigger || prev_adc_continuous != pmic_adc_continuous || vbus_attached) {
-        res = pmic_set_adc_configuration(pmic_adc_trigger, pmic_adc_continuous || vbus_attached);
-        if (res != PMIC_OK) {
-            set_pmic_status(res);
-            return;  // Stop on communication error
-        }
-        if (pmic_adc_trigger || pmic_adc_continuous || vbus_attached) {
-            adc_active = true;
-        }
-        prev_adc_continuous = pmic_adc_continuous;
-        pmic_adc_trigger = 0;
-        LockI2CSlave(true);
-        i2c_registers[I2C_REG_PMIC_ADC_CONTROL] &= ~(1 << 0);  // Clear the trigger bit
-        LockI2CSlave(false);
-    }
+    LockI2CSlave(true);
+    i2c_registers[I2C_REG_PMIC_ADC_VBAT_0] = adc_vbat & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_VBAT_1] = (adc_vbat >> 8) & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_VSYS_0] = adc_vsys & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_VSYS_1] = (adc_vsys >> 8) & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_TS_0] = adc_tspct & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_TS_1] = (adc_tspct >> 8) & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_ICHGR_0] = adc_ichgr & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_ICHGR_1] = (adc_ichgr >> 8) & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
+    i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
+    LockI2CSlave(false);
 
     // Battery detection
     if (empty_battery_delay > 0) {
@@ -520,11 +530,6 @@ void pmic_task(void) {
             prev_vbus_attached = false;  // Force redetect
         }
     }
-
-    LockI2CSlave(true);
-    i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
-    LockI2CSlave(false);
 
     if ((!battery_attached) && (!pmic_force_detect_battery) && (!pmic_force_disable_charging) && (vbus_attached)) {
         // Automatically redetect battery if no battery found
@@ -552,7 +557,8 @@ void pmic_task(void) {
             }
             if (readback_current != pmic_target_charging_current) {
                 // Increase current if requested (workaround)
-                // printf("Reconfigure current %lu %lu\r\n", readback_current, pmic_target_charging_current);
+                // printf("Reconfigure current %" PRIu16 " %" PRIu16 "\r\n", readback_current,
+                // pmic_target_charging_current);
                 configure_usb_input();
                 pmic_configure_battery_charger(battery_attached || pmic_force_detect_battery,
                                                pmic_target_charging_current);
@@ -562,7 +568,7 @@ void pmic_task(void) {
         if ((!prev_vbus_attached && vbus_attached) ||
             (vbus_attached && (prev_pmic_target_charging_current != pmic_target_charging_current))) {
             //   Badge has been connected to USB supply
-            // printf("CHANGE! %lu\r\n", pmic_target_charging_current);
+            // printf("Connected to usb (charging %" PRIu16 " mA)\r\n", pmic_target_charging_current);
             configure_usb_input();
             pmic_battery_attached(&battery_attached, empty_battery_delay == 0);
             pmic_configure_battery_charger(battery_attached || pmic_force_detect_battery,
@@ -600,10 +606,10 @@ void pmic_task(void) {
 
     if (!battery_attached) {
         power_state = POWER_STATE_NO_BATTERY;
-    } else if (charge_status == PMIC_CHARGE_STATUS_NOT_CHARGING) {
+    } else if (charge_status == PMIC_CHARGE_STATUS_NOT_CHARGING || (adc_ichgr == 0)) {
         power_state = POWER_STATE_BATTERY;
     } else {
-        power_state = POWER_STATE_CHARGING;  // Should not happen
+        power_state = POWER_STATE_CHARGING;
     }
 }
 
@@ -952,6 +958,10 @@ int main() {
         }
 
         write_addressable_leds();
+
+        if (get_debug_available() > 0 && i2c_registers[I2C_REG_DEBUG] == 0) {
+            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
+        }
 
         funDigitalWrite(pin_interrupt,
                         (keyboard_interrupt | input_interrupt | pmic_interrupt)
