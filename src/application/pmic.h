@@ -67,6 +67,8 @@ pmic_result_t pmic_set_high_voltage_dcp(bool enable);
 pmic_result_t pmic_get_high_voltage_dcp(bool* out_enable);
 pmic_result_t pmic_set_maxcharge(bool enable);
 pmic_result_t pmic_get_maxcharge(bool* out_enable);
+pmic_result_t pmic_set_auto_dpdm_enable(bool enable);
+pmic_result_t pmic_get_auto_dpdm_enable(bool* out_enable);
 pmic_result_t pmic_set_adc_configuration(bool start, bool continuous);
 pmic_result_t pmic_get_adc_configuration(bool* out_busy, bool* out_continuous);
 

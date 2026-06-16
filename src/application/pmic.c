@@ -197,6 +197,30 @@ pmic_result_t pmic_get_maxcharge(bool* out_enable) {
     return PMIC_OK;
 }
 
+pmic_result_t pmic_set_auto_dpdm_enable(bool enable) {
+    // When enabled (chip default), the BQ25895 performs USB BC1.2 D+/D- detection
+    // on every VBUS rise and overwrites IINLIM with the detected source's limit.
+    // The Tanmatsu's D+/D- pins are wired to the ESP32, not to the PMIC, so
+    // detection sees floating lines and lands on "Unknown adapter" = 500 mA,
+    // overriding whatever the host has written. Disable to keep IINLIM under
+    // host control.
+    bq25895_reg02_t value;
+    pmic_result_t res = pmic_read_reg(0x02, &value.raw);
+    if (res != PMIC_OK) return res;
+    value.auto_dpdm_en = enable;
+    return pmic_write_reg(0x02, value.raw);
+}
+
+pmic_result_t pmic_get_auto_dpdm_enable(bool* out_enable) {
+    bq25895_reg02_t value;
+    pmic_result_t res = pmic_read_reg(0x02, &value.raw);
+    if (res != PMIC_OK) return res;
+    if (out_enable) {
+        *out_enable = value.auto_dpdm_en;
+    }
+    return PMIC_OK;
+}
+
 pmic_result_t pmic_set_adc_configuration(bool start, bool continuous) {
     bq25895_reg02_t value;
     pmic_result_t res = pmic_read_reg(0x02, &value.raw);
@@ -1372,7 +1396,6 @@ pmic_result_t pmic_power_off() {
 
 pmic_result_t pmic_battery_attached(bool* battery_attached, bool detect_empty_battery) {
     pmic_result_t res;
-    *battery_attached = false;
     uint16_t vbatt = 0;
     bool therm_stat = false;
 
@@ -1390,6 +1413,7 @@ pmic_result_t pmic_battery_attached(bool* battery_attached, bool detect_empty_ba
         *battery_attached = true;
         return res;
     } else if (therm_stat) {  // Battery temperature too high, ignore battery even if attached
+        *battery_attached = false;
         return res;
     }
 
@@ -1419,6 +1443,15 @@ pmic_result_t pmic_battery_attached(bool* battery_attached, bool detect_empty_ba
         }
     }
 
+    // Could not confirm presence. A vbatt at the 2304 mV ADC offset means the
+    // BQ25895 has not produced a valid conversion yet (continuous ADC may have
+    // just been re-enabled on this same tick). Leave the caller's previous
+    // belief untouched in that case so we don't disable charging on a stale
+    // read. A reading above the offset is real and below threshold means the
+    // battery is genuinely missing or beyond recovery.
+    if (vbatt > 2304) {
+        *battery_attached = false;
+    }
     return res;
 }
 

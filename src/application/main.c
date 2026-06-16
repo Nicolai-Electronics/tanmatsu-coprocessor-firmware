@@ -18,7 +18,7 @@
 #include "rtc.h"
 
 // Firmware version
-#define FW_VERSION 8
+#define FW_VERSION 9
 
 // Configuration
 const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps for keyboard backlight
@@ -410,6 +410,7 @@ void bkp_read_all(void) {
 }
 
 void configure_usb_input(void) {
+    pmic_set_auto_dpdm_enable(false);  // PMIC must not run BC1.2 auto-detect; it would overwrite IINLIM on every VBUS rise
     pmic_set_input_current_limit(2000, false, false);  // Allow up to 2000mA to be sourced from the USB-C port
     pmic_set_input_current_optimizer(true);            // Reduce current if supply insufficient for 2000mA
 }
