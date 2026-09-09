@@ -16,7 +16,7 @@ clean:
 
 .PHONY: flash
 flash: build
-	minichlink -w build/application/coprocessor.bin flash -b -D
+	minichlink -w build/application/coprocessor.bin flash -b
 
 .PHONY: monitor
 monitor:
@@ -24,4 +24,4 @@ monitor:
 
 .PHONY: flashmonitor
 flashmonitor: build
-	minichlink -w build/application/coprocessor.bin flash -b -D -T
+	minichlink -w build/application/coprocessor.bin flash -b -T
