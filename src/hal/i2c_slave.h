@@ -51,6 +51,8 @@ struct _i2c_slave_state {
     bool read_only2;
     bool writing;
     bool address2matched;
+    bool read_pending;
+    uint8_t read_pending_position;
 } i2c_slave_state;
 
 void SetupI2CSlave(uint8_t address, volatile uint8_t* registers, uint8_t size, i2c_write_callback_t write_callback, i2c_read_callback_t read_callback, bool read_only) {
@@ -67,6 +69,8 @@ void SetupI2CSlave(uint8_t address, volatile uint8_t* registers, uint8_t size, i
     i2c_slave_state.write_callback2 = NULL;
     i2c_slave_state.read_callback2 = NULL;
     i2c_slave_state.read_only2 = false;
+    i2c_slave_state.read_pending = false;
+    i2c_slave_state.read_pending_position = 0;
 
     // Enable I2C1
     RCC->APB1PCENR |= RCC_APB1Periph_I2C1;
@@ -148,6 +152,7 @@ void I2C1_EV_IRQHandler(void) {
         i2c_slave_state.first_write = 1; // Next write will be the offset
         i2c_slave_state.position = i2c_slave_state.offset; // Reset position
         i2c_slave_state.address2matched = !!(STAR2 & I2C_STAR2_DUALF);
+        i2c_slave_state.read_pending = false; // No speculative read carries over into a new transaction
     }
 
     if (STAR1 & I2C_STAR1_RXNE) { // Write event
@@ -174,12 +179,24 @@ void I2C1_EV_IRQHandler(void) {
 
     if (STAR1 & I2C_STAR1_TXE) { // Read event
         i2c_slave_state.writing = false;
+        if (i2c_slave_state.read_pending) {
+            i2c_slave_state.read_pending = false;
+            if (i2c_slave_state.address2matched) {
+                if (i2c_slave_state.read_callback2 != NULL) {
+                    i2c_slave_state.read_callback2(i2c_slave_state.read_pending_position);
+                }
+            } else {
+                if (i2c_slave_state.read_callback1 != NULL) {
+                    i2c_slave_state.read_callback1(i2c_slave_state.read_pending_position);
+                }
+            }
+        }
+
         if (i2c_slave_state.address2matched) {
             if (i2c_slave_state.position < i2c_slave_state.size2) {
                 I2C1->DATAR = i2c_slave_state.registers2[i2c_slave_state.position];
-                if (i2c_slave_state.read_callback2 != NULL) {
-                    i2c_slave_state.read_callback2(i2c_slave_state.position);
-                }
+                i2c_slave_state.read_pending = true;
+                i2c_slave_state.read_pending_position = i2c_slave_state.position;
                 i2c_slave_state.position++;
             } else {
                 I2C1->DATAR = 0x00;
@@ -187,9 +204,8 @@ void I2C1_EV_IRQHandler(void) {
         } else {
             if (i2c_slave_state.position < i2c_slave_state.size1) {
                 I2C1->DATAR = i2c_slave_state.registers1[i2c_slave_state.position];
-                if (i2c_slave_state.read_callback1 != NULL) {
-                    i2c_slave_state.read_callback1(i2c_slave_state.position);
-                }
+                i2c_slave_state.read_pending = true;
+                i2c_slave_state.read_pending_position = i2c_slave_state.position;
                 i2c_slave_state.position++;
             } else {
                 I2C1->DATAR = 0x00;
@@ -225,6 +241,10 @@ void I2C1_ER_IRQHandler(void) {
 
     if (STAR1 & I2C_STAR1_AF) { // Acknowledge failure
         I2C1->STAR1 &= ~(I2C_STAR1_AF); // Clear error
+        if (i2c_slave_state.read_pending) {
+            i2c_slave_state.read_pending = false;
+            i2c_slave_state.position--;
+        }
     }
 }
 
