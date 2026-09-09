@@ -10,6 +10,7 @@
 #include <string.h>
 #include "FreeRTOS.h"
 #include "ch32v003fun.h"
+#include "debug_output.h"
 #include "hardware.h"
 #include "i2c_master.h"
 #include "i2c_registers.h"
@@ -108,16 +109,6 @@ char debug_buffer[1024] = {0};
 uint32_t debug_write_offset = 0;
 uint32_t debug_read_offset = 0;
 
-int putchar(int c) {
-    uint32_t next = (debug_write_offset + 1) % sizeof(debug_buffer);
-    if (next == debug_read_offset) {
-        return 0;
-    }
-    debug_buffer[debug_write_offset] = (char)c;
-    debug_write_offset = next;
-    return c;
-}
-
 char get_debug_char(void) {
     if (debug_read_offset == debug_write_offset) {
         return 0;
@@ -129,6 +120,25 @@ char get_debug_char(void) {
 
 uint32_t get_debug_available(void) {
     return (debug_write_offset - debug_read_offset + sizeof(debug_buffer)) % sizeof(debug_buffer);
+}
+
+int putchar(int c) {
+    uint32_t next = (debug_write_offset + 1) % sizeof(debug_buffer);
+    if (next == debug_read_offset) {
+        return 0;
+    }
+    debug_buffer[debug_write_offset] = (char)c;
+    debug_write_offset = next;
+    return c;
+}
+
+int _write(int fd, const char* buf, int size) {
+    (void)fd;
+    for (int i = 0; i < size; i++) {
+        putchar(buf[i]);
+    }
+    debug_output_write(buf, size);
+    return size;
 }
 
 // Interrupts
@@ -198,6 +208,7 @@ void timer2_set(uint16_t value) {
     }
     TIM2->CH2CVR = timer2_pwm_cycle_width - value;
     TIM2->SWEVGR |= TIM_UG;  // Apply
+    printf("Keyboard backlight set to 0x%02x\r\n", value);
 }
 
 void timer2_init() {
@@ -231,6 +242,7 @@ void timer3_set(uint16_t value) {
     }
     TIM3->CH1CVR = timer3_pwm_cycle_width - value;
     TIM3->SWEVGR |= TIM_UG;  // Apply
+    printf("Display backlight set to 0x%02x\r\n", value);
 }
 
 void timer3_init() {
@@ -471,8 +483,15 @@ void i2c_read_cb(uint8_t reg) {
         case I2C_REG_PMIC_ADC_ICHGR_1:
             interrupt_clear(false, false, true);  // Clear PMIC interrupt flag
             break;
-        case I2C_REG_DEBUG:
-            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
+        case I2C_REG_DEBUG_0:
+        case I2C_REG_DEBUG_1:
+        case I2C_REG_DEBUG_2:
+        case I2C_REG_DEBUG_3:
+        case I2C_REG_DEBUG_4:
+        case I2C_REG_DEBUG_5:
+        case I2C_REG_DEBUG_6:
+        case I2C_REG_DEBUG_7:
+            i2c_registers[reg] = get_debug_available() > 0 ? get_debug_char() : 0;
             break;
         default:
             break;
@@ -869,10 +888,6 @@ void keyboard_task(void* pvParameters) {
         // short, fixed interval; write_addressable_leds() is a cheap no-op if a DMA
         // transfer is already in progress.
         write_addressable_leds();
-
-        if (get_debug_available() > 0 && i2c_registers[I2C_REG_DEBUG] == 0) {
-            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
-        }
 
         vTaskDelay(pdMS_TO_TICKS(keyboard_scan_interval));
     }
