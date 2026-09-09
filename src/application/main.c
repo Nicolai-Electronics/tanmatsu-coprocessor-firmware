@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "FreeRTOS.h"
 #include "ch32v003fun.h"
 #include "hardware.h"
 #include "i2c_master.h"
@@ -17,6 +18,7 @@
 #include "leds.h"
 #include "pmic.h"
 #include "rtc.h"
+#include "task.h"
 
 // Firmware version
 #define FW_VERSION 9
@@ -26,6 +28,35 @@ const uint16_t timer2_pwm_cycle_width = 255;       // Amount of brightness steps
 const uint16_t timer3_pwm_cycle_width = 255;       // Amount of brightness steps for display backlight
 static const uint32_t keyboard_scan_interval = 1;  // milliseconds (per row)
 static const uint32_t input_scan_interval = 50;    // milliseconds
+static const uint32_t rtc_scan_interval = 1;       // milliseconds
+static const uint32_t radio_scan_interval = 50;    // milliseconds
+static const uint32_t led_scan_interval = 250;     // milliseconds
+static const uint32_t pmic_scan_interval = 250;    // milliseconds
+
+// Task priorities. pmic_task is kept lowest: pm_i2c_transaction() (src/hal/i2c_master.c)
+// busy-spins on hardware flags without ever calling vTaskDelay, so it must never be able
+// to delay time-critical keyboard/input scanning regardless of how long a PMIC bus
+// transaction takes (or times out).
+#define TASK_PRIORITY_PMIC     1
+#define TASK_PRIORITY_RADIO    2
+#define TASK_PRIORITY_LED      2
+#define TASK_PRIORITY_INPUT    3
+#define TASK_PRIORITY_RTC      3
+#define TASK_PRIORITY_KEYBOARD 4
+
+// Stack sizes are generous on purpose: the vendored WCH port (src/freertos/portable/GCC/RISC-V/)
+// declares configISR_STACK_SIZE_WORDS but never actually switches the stack pointer to it on
+// interrupt entry (xISRStackTop is declared extern in portASM.S but never referenced there) -
+// SysTick_Handler, SW_Handler (every task switch) and every peripheral ISR (I2C1, DMA1, ...) all
+// run on top of whichever task stack happens to be active, including nested on top of each
+// other. Every task's stack therefore needs headroom for its own call depth *plus* whatever
+// interrupts land on it, not just its own worst case.
+#define TASK_STACK_KEYBOARD 384
+#define TASK_STACK_INPUT    384
+#define TASK_STACK_RTC      256
+#define TASK_STACK_RADIO    384
+#define TASK_STACK_LED      384
+#define TASK_STACK_PMIC     768
 
 typedef enum {
     RADIO_STATE_OFF = 0,
@@ -53,6 +84,13 @@ volatile bool pmic_interrupt = false;
 volatile bool pmic_force_disable_charging = false;
 volatile bool pmic_force_detect_battery = false;
 volatile uint16_t pmic_target_charging_current = 512;
+
+// Power-off requested by the host over I2C. The I2C1 ISR (src/hal/i2c_slave.h) calls
+// i2c_write_cb() directly from interrupt context, where blocking PMIC I2C2 transactions
+// and vTaskDelay() cannot be used, so the actual power-off sequence is deferred to
+// input_task() (task context).
+volatile bool i2c_power_off_requested = false;
+volatile bool i2c_power_off_enable_wakeup = false;
 
 // Radio, USB and camera flags
 volatile radio_state_t radio_state = RADIO_STATE_OFF;
@@ -97,6 +135,9 @@ uint32_t get_debug_available(void) {
 void interrupt_update_reg(void) {
     i2c_registers[I2C_REG_INTERRUPT] =
         (keyboard_interrupt & 1) | ((input_interrupt & 1) << 1) | ((pmic_interrupt & 1) << 2);
+    funDigitalWrite(
+        pin_interrupt,
+        (keyboard_interrupt | input_interrupt | pmic_interrupt) ? FUN_LOW : FUN_HIGH);  // Update interrupt pin state
 }
 
 void interrupt_set(bool keyboard, bool input, bool pmic) {
@@ -213,6 +254,18 @@ void timer3_init() {
     timer3_set(255);  // Load default target PWM dutycycle
 
     TIM3->CTLR1 |= TIM_CEN;  // Enable timer
+}
+
+// Shared by the power-button long-press path and the host-requested (I2C) power-off
+// path: turn off the backlights and all addressable LEDs before the PMIC cuts power.
+void power_off_leds_and_timers(void) {
+    timer2_set(0);
+    timer3_set(0);
+    for (uint8_t i = 0; i < 6; i++) {
+        set_led_data(i, 0, false);  // Turn off all LEDs
+        set_led_data(i, 0, true);   // Turn off all LEDs
+    }
+    write_addressable_leds();
 }
 
 void set_pmic_status(pmic_result_t pmic_result) {
@@ -334,16 +387,11 @@ void i2c_write_cb(uint8_t reg, uint8_t length) {
                 bool power_off = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 0) & 1;
                 bool enable_wakeup = (i2c_registers[I2C_REG_PMIC_POWER_CONTROL] >> 1) & 1;
                 if (power_off) {
-                    timer2_set(0);
-                    timer3_set(0);
-                    rtc_configure_wakeup_pin(enable_wakeup);  // Enable alarm pin output if bit 2 is set
-                    for (uint8_t i = 0; i < 6; i++) {
-                        set_led_data(i, 0, false);  // Turn off all LEDs
-                        set_led_data(i, 0, true);   // Turn off all LEDs
-                    }
-                    write_addressable_leds();
-                    Delay_Ms(10);
-                    pmic_power_off();  // So long and thanks for all the fish
+                    // This callback runs from the I2C1 ISR (see src/hal/i2c_slave.h), where
+                    // blocking PMIC I2C2 transactions and vTaskDelay() must not be used.
+                    // Defer the actual power-off sequence to input_task().
+                    i2c_power_off_enable_wakeup = enable_wakeup;
+                    i2c_power_off_requested = true;
                 }
                 break;
             case I2C_REG_LED_DATA_LED0_G:
@@ -447,7 +495,9 @@ void configure_usb_input(void) {
     pmic_set_input_current_optimizer(true);            // Reduce current if supply insufficient for 2000mA
 }
 
-void pmic_task(void) {
+void pmic_task(void* pvParameters) {
+    (void)pvParameters;
+
     // Periodic task for controlling PMIC
     static uint8_t empty_battery_delay = 4;
     static uint8_t battery_redetect_timer = 0;
@@ -457,332 +507,507 @@ void pmic_task(void) {
     static bool prev_force_disable_charging = false;
     static uint16_t prev_pmic_target_charging_current = 0;
 
-    pmic_result_t res;
+    for (;;) {
+        pmic_result_t res;
 
-    // Configure
-    configure_usb_input();
-    pmic_set_adc_configuration(false, true);
+        // Configure
+        configure_usb_input();
+        pmic_set_adc_configuration(false, true);
 
-    // Fault reporting
-    uint8_t raw_faults = 0;
-    pmic_faults_t faults = {0};
-    res = pmic_get_faults(&raw_faults, &faults);
-    set_pmic_status(res);
-    if (res != PMIC_OK) {
-        return;  // Stop on communication error
-    }
-    uint8_t prev_raw_faults = i2c_registers[I2C_REG_PMIC_FAULT];
-    i2c_registers[I2C_REG_PMIC_FAULT] = raw_faults;
-    if (prev_raw_faults != raw_faults) {
-        interrupt_set(false, false, true);
-    }
-
-    // ADC
-    uint16_t adc_vbat = 0;
-    res = pmic_get_adc_vbat(&adc_vbat, NULL);
-    if (res != PMIC_OK) {
+        // Fault reporting
+        uint8_t raw_faults = 0;
+        pmic_faults_t faults = {0};
+        res = pmic_get_faults(&raw_faults, &faults);
         set_pmic_status(res);
-        return;  // Stop on communication error
-    }
-
-    uint16_t adc_vsys = 0;
-    res = pmic_get_adc_vsys(&adc_vsys);
-    if (res != PMIC_OK) {
-        set_pmic_status(res);
-        return;  // Stop on communication error
-    }
-
-    uint16_t adc_tspct = 0;
-    res = pmic_get_adc_tspct(&adc_tspct);
-    if (res != PMIC_OK) {
-        set_pmic_status(res);
-        return;  // Stop on communication error
-    }
-
-    uint16_t adc_ichgr = 0;
-    res = pmic_get_adc_ichgr(&adc_ichgr);
-    if (res != PMIC_OK) {
-        set_pmic_status(res);
-        return;  // Stop on communication error
-    }
-
-    // Read voltage on USB interface and power good status
-    uint16_t adc_vbus = 0;
-    pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
-
-    LockI2CSlave(true);
-    i2c_registers[I2C_REG_PMIC_ADC_VBAT_0] = adc_vbat & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VBAT_1] = (adc_vbat >> 8) & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VSYS_0] = adc_vsys & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VSYS_1] = (adc_vsys >> 8) & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_TS_0] = adc_tspct & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_TS_1] = (adc_tspct >> 8) & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_ICHGR_0] = adc_ichgr & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_ICHGR_1] = (adc_ichgr >> 8) & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
-    i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
-    LockI2CSlave(false);
-
-    // Battery detection
-    if (empty_battery_delay > 0) {
-        empty_battery_delay -= 1;
-        if (empty_battery_delay == 0) {
-            prev_vbus_attached = false;  // Force redetect
+        if (res != PMIC_OK) {
+            goto pmic_task_iteration_done;  // Stop on communication error
         }
-    }
+        uint8_t prev_raw_faults = i2c_registers[I2C_REG_PMIC_FAULT];
+        i2c_registers[I2C_REG_PMIC_FAULT] = raw_faults;
+        if (prev_raw_faults != raw_faults) {
+            interrupt_set(false, false, true);
+        }
 
-    if ((!battery_attached) && (!pmic_force_detect_battery) && (!pmic_force_disable_charging) && (vbus_attached)) {
-        // Automatically redetect battery if no battery found
-        if (battery_redetect_timer < 100) {
-            battery_redetect_timer++;
+        // ADC
+        uint16_t adc_vbat = 0;
+        res = pmic_get_adc_vbat(&adc_vbat, NULL);
+        if (res != PMIC_OK) {
+            set_pmic_status(res);
+            goto pmic_task_iteration_done;  // Stop on communication error
+        }
+
+        uint16_t adc_vsys = 0;
+        res = pmic_get_adc_vsys(&adc_vsys);
+        if (res != PMIC_OK) {
+            set_pmic_status(res);
+            goto pmic_task_iteration_done;  // Stop on communication error
+        }
+
+        uint16_t adc_tspct = 0;
+        res = pmic_get_adc_tspct(&adc_tspct);
+        if (res != PMIC_OK) {
+            set_pmic_status(res);
+            goto pmic_task_iteration_done;  // Stop on communication error
+        }
+
+        uint16_t adc_ichgr = 0;
+        res = pmic_get_adc_ichgr(&adc_ichgr);
+        if (res != PMIC_OK) {
+            set_pmic_status(res);
+            goto pmic_task_iteration_done;  // Stop on communication error
+        }
+
+        // Read voltage on USB interface and power good status
+        uint16_t adc_vbus = 0;
+        pmic_get_adc_vbus(&adc_vbus, &vbus_attached);
+
+        LockI2CSlave(true);
+        i2c_registers[I2C_REG_PMIC_ADC_VBAT_0] = adc_vbat & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_VBAT_1] = (adc_vbat >> 8) & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_VSYS_0] = adc_vsys & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_VSYS_1] = (adc_vsys >> 8) & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_TS_0] = adc_tspct & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_TS_1] = (adc_tspct >> 8) & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_ICHGR_0] = adc_ichgr & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_ICHGR_1] = (adc_ichgr >> 8) & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_VBUS_0] = adc_vbus & 0xFF;
+        i2c_registers[I2C_REG_PMIC_ADC_VBUS_1] = (adc_vbus >> 8) & 0xFF;
+        LockI2CSlave(false);
+
+        // Battery detection
+        if (empty_battery_delay > 0) {
+            empty_battery_delay -= 1;
+            if (empty_battery_delay == 0) {
+                prev_vbus_attached = false;  // Force redetect
+            }
+        }
+
+        if ((!battery_attached) && (!pmic_force_detect_battery) && (!pmic_force_disable_charging) && (vbus_attached)) {
+            // Automatically redetect battery if no battery found
+            if (battery_redetect_timer < 100) {
+                battery_redetect_timer++;
+            } else {
+                battery_redetect_timer = 0;
+                prev_vbus_attached = false;  // Force redetect
+            }
+        }
+
+        if (pmic_force_disable_charging) {
+            // Charging has been disabled by user
+            if (!prev_force_disable_charging) {
+                res = pmic_configure_battery_charger(false, 0);
+            }
+            prev_force_disable_charging = pmic_force_disable_charging;
         } else {
-            battery_redetect_timer = 0;
-            prev_vbus_attached = false;  // Force redetect
-        }
-    }
-
-    if (pmic_force_disable_charging) {
-        // Charging has been disabled by user
-        if (!prev_force_disable_charging) {
-            res = pmic_configure_battery_charger(false, 0);
-        }
-        prev_force_disable_charging = pmic_force_disable_charging;
-    } else {
-        if (vbus_attached) {
-            uint16_t readback_current = 0;
-            res = pmic_get_fast_charge_current(&readback_current);
-            if (res != PMIC_OK) {
-                set_pmic_status(res);
-                return;  // Stop on communication error
+            if (vbus_attached) {
+                uint16_t readback_current = 0;
+                res = pmic_get_fast_charge_current(&readback_current);
+                if (res != PMIC_OK) {
+                    set_pmic_status(res);
+                    goto pmic_task_iteration_done;  // Stop on communication error
+                }
+                if (readback_current != pmic_target_charging_current) {
+                    // Increase current if requested (workaround)
+                    // printf("Reconfigure current %" PRIu16 " %" PRIu16 "\r\n", readback_current,
+                    // pmic_target_charging_current);
+                    configure_usb_input();
+                    pmic_configure_battery_charger(battery_attached || pmic_force_detect_battery,
+                                                   pmic_target_charging_current);
+                }
             }
-            if (readback_current != pmic_target_charging_current) {
-                // Increase current if requested (workaround)
-                // printf("Reconfigure current %" PRIu16 " %" PRIu16 "\r\n", readback_current,
-                // pmic_target_charging_current);
+
+            if ((!prev_vbus_attached && vbus_attached) ||
+                (vbus_attached && (prev_pmic_target_charging_current != pmic_target_charging_current))) {
+                //   Badge has been connected to USB supply
+                // printf("Connected to usb (charging %" PRIu16 " mA)\r\n", pmic_target_charging_current);
                 configure_usb_input();
+                pmic_battery_attached(&battery_attached, empty_battery_delay == 0);
                 pmic_configure_battery_charger(battery_attached || pmic_force_detect_battery,
-                                               pmic_target_charging_current);
+                                               512);  // Always start charging at 512mA (workaround)
+            } else if (prev_vbus_attached && !vbus_attached) {
+                // Badge has been disconnected from USB supply
+                pmic_configure_battery_charger(false, 0);  // Disable battery charging
             }
         }
+        prev_vbus_attached = vbus_attached;
+        prev_pmic_target_charging_current = pmic_target_charging_current;
 
-        if ((!prev_vbus_attached && vbus_attached) ||
-            (vbus_attached && (prev_pmic_target_charging_current != pmic_target_charging_current))) {
-            //   Badge has been connected to USB supply
-            // printf("Connected to usb (charging %" PRIu16 " mA)\r\n", pmic_target_charging_current);
-            configure_usb_input();
-            pmic_battery_attached(&battery_attached, empty_battery_delay == 0);
-            pmic_configure_battery_charger(battery_attached || pmic_force_detect_battery,
-                                           512);  // Always start charging at 512mA (workaround)
-        } else if (prev_vbus_attached && !vbus_attached) {
-            // Badge has been disconnected from USB supply
-            pmic_configure_battery_charger(false, 0);  // Disable battery charging
+        uint8_t charging_status = 0;
+        if (battery_attached) {
+            charging_status |= (1 << 0);  // Bit 0: battery attached
         }
-    }
-    prev_vbus_attached = vbus_attached;
-    prev_pmic_target_charging_current = pmic_target_charging_current;
+        if (vbus_attached) {
+            charging_status |= (1 << 1);  // Bit 1: power input attached
+        }
+        if (pmic_force_disable_charging) {
+            charging_status |= (1 << 2);  // Bit 2: charging disabled by user
+        }
 
-    uint8_t charging_status = 0;
-    if (battery_attached) {
-        charging_status |= (1 << 0);  // Bit 0: battery attached
-    }
-    if (vbus_attached) {
-        charging_status |= (1 << 1);  // Bit 1: power input attached
-    }
-    if (pmic_force_disable_charging) {
-        charging_status |= (1 << 2);  // Bit 2: charging disabled by user
-    }
+        pmic_charge_status_t charge_status = PMIC_CHARGE_STATUS_NOT_CHARGING;
+        res = pmic_get_charge_status(&charge_status);
+        if (res != PMIC_OK) {
+            set_pmic_status(res);
+            goto pmic_task_iteration_done;  // Stop on communication error
+        }
 
-    pmic_charge_status_t charge_status = PMIC_CHARGE_STATUS_NOT_CHARGING;
-    res = pmic_get_charge_status(&charge_status);
-    if (res != PMIC_OK) {
-        set_pmic_status(res);
-        return;  // Stop on communication error
-    }
+        charging_status |=
+            (((uint8_t)(charge_status) & 3) << 3);  // Charge status is two bits, put at bits 3 and 4 of the register
 
-    charging_status |=
-        (((uint8_t)(charge_status) & 3) << 3);  // Charge status is two bits, put at bits 3 and 4 of the register
+        i2c_registers[I2C_REG_PMIC_CHARGING_STATUS] = charging_status;
 
-    i2c_registers[I2C_REG_PMIC_CHARGING_STATUS] = charging_status;
+        if (!battery_attached) {
+            power_state = POWER_STATE_NO_BATTERY;
+        } else if (charge_status == PMIC_CHARGE_STATUS_NOT_CHARGING || (adc_ichgr == 0)) {
+            power_state = POWER_STATE_BATTERY;
+        } else {
+            power_state = POWER_STATE_CHARGING;
+        }
 
-    if (!battery_attached) {
-        power_state = POWER_STATE_NO_BATTERY;
-    } else if (charge_status == PMIC_CHARGE_STATUS_NOT_CHARGING || (adc_ichgr == 0)) {
-        power_state = POWER_STATE_BATTERY;
-    } else {
-        power_state = POWER_STATE_CHARGING;
+    pmic_task_iteration_done:
+        vTaskDelay(pdMS_TO_TICKS(pmic_scan_interval));
     }
 }
 
-void radio_task() {
-    bool enable_and_camera = false;
-    bool boot_and_usb = false;
+void radio_task(void* pvParameters) {
+    (void)pvParameters;
+    for (;;) {
+        bool enable_and_camera = false;
+        bool boot_and_usb = false;
 
-    if (camera_enable_target && (radio_target == RADIO_STATE_OFF)) {
-        // If user requires camera to be enabled then the radio needs to be enabled too
-        radio_target = RADIO_STATE_APPLICATION;
+        if (camera_enable_target && (radio_target == RADIO_STATE_OFF)) {
+            // If user requires camera to be enabled then the radio needs to be enabled too
+            radio_target = RADIO_STATE_APPLICATION;
+        }
+
+        switch (radio_target) {
+            case RADIO_STATE_BOOTLOADER:
+                switch (radio_state) {
+                    case RADIO_STATE_BOOTLOADER:
+                        // Target state reached, radio on and hopefully in bootloader mode
+                        enable_and_camera = true;
+                        boot_and_usb = usb_otg_enable_target;
+                        break;
+                    case RADIO_STATE_APPLICATION:
+                        // Wrong state, disable radio
+                        enable_and_camera = false;
+                        boot_and_usb = false;
+                        radio_state = RADIO_STATE_OFF;
+                        break;
+                    case RADIO_STATE_OFF:
+                    default:
+                        // Radio is off, enable radio in bootloader mode
+                        enable_and_camera = true;
+                        boot_and_usb = false;
+                        radio_state = RADIO_STATE_BOOTLOADER;
+                        break;
+                }
+                break;
+            case RADIO_STATE_APPLICATION:
+                switch (radio_state) {
+                    case RADIO_STATE_BOOTLOADER:
+                        // Wrong state, disable radio
+                        enable_and_camera = false;
+                        boot_and_usb = true;
+                        radio_state = RADIO_STATE_OFF;
+                        break;
+                    case RADIO_STATE_APPLICATION:
+                        // Target state reached, radio on and hopefully in application mode
+                        enable_and_camera = true;
+                        boot_and_usb = usb_otg_enable_target;
+                        break;
+                    case RADIO_STATE_OFF:
+                    default:
+                        // Radio is off, enable radio in application mode
+                        enable_and_camera = true;
+                        boot_and_usb = true;
+                        radio_state = RADIO_STATE_APPLICATION;
+                        break;
+                }
+                break;
+            case RADIO_STATE_OFF:
+            default:
+                radio_state = RADIO_STATE_OFF;
+                enable_and_camera = false;
+                boot_and_usb = usb_otg_enable_target;
+                break;
+        }
+
+        write_addressable_leds();
+
+        if (usb_otg_enable_state != usb_otg_enable_target) {
+            // Enable or disable PMIC OTG boost DC/DC converter
+            set_pmic_status(pmic_set_otg_enable(usb_otg_enable_target));
+            usb_otg_enable_state = usb_otg_enable_target;
+        }
+
+        funDigitalWrite(pin_c6_boot, boot_and_usb ? FUN_HIGH : FUN_LOW);
+        funDigitalWrite(pin_c6_enable, enable_and_camera ? FUN_HIGH : FUN_LOW);
+
+        vTaskDelay(pdMS_TO_TICKS(radio_scan_interval));
     }
-
-    switch (radio_target) {
-        case RADIO_STATE_BOOTLOADER:
-            switch (radio_state) {
-                case RADIO_STATE_BOOTLOADER:
-                    // Target state reached, radio on and hopefully in bootloader mode
-                    enable_and_camera = true;
-                    boot_and_usb = usb_otg_enable_target;
-                    break;
-                case RADIO_STATE_APPLICATION:
-                    // Wrong state, disable radio
-                    enable_and_camera = false;
-                    boot_and_usb = false;
-                    radio_state = RADIO_STATE_OFF;
-                    break;
-                case RADIO_STATE_OFF:
-                default:
-                    // Radio is off, enable radio in bootloader mode
-                    enable_and_camera = true;
-                    boot_and_usb = false;
-                    radio_state = RADIO_STATE_BOOTLOADER;
-                    break;
-            }
-            break;
-        case RADIO_STATE_APPLICATION:
-            switch (radio_state) {
-                case RADIO_STATE_BOOTLOADER:
-                    // Wrong state, disable radio
-                    enable_and_camera = false;
-                    boot_and_usb = true;
-                    radio_state = RADIO_STATE_OFF;
-                    break;
-                case RADIO_STATE_APPLICATION:
-                    // Target state reached, radio on and hopefully in application mode
-                    enable_and_camera = true;
-                    boot_and_usb = usb_otg_enable_target;
-                    break;
-                case RADIO_STATE_OFF:
-                default:
-                    // Radio is off, enable radio in application mode
-                    enable_and_camera = true;
-                    boot_and_usb = true;
-                    radio_state = RADIO_STATE_APPLICATION;
-                    break;
-            }
-            break;
-        case RADIO_STATE_OFF:
-        default:
-            radio_state = RADIO_STATE_OFF;
-            enable_and_camera = false;
-            boot_and_usb = usb_otg_enable_target;
-            break;
-    }
-
-    write_addressable_leds();
-
-    if (usb_otg_enable_state != usb_otg_enable_target) {
-        // Enable or disable PMIC OTG boost DC/DC converter
-        set_pmic_status(pmic_set_otg_enable(usb_otg_enable_target));
-        usb_otg_enable_state = usb_otg_enable_target;
-    }
-
-    funDigitalWrite(pin_c6_boot, boot_and_usb ? FUN_HIGH : FUN_LOW);
-    funDigitalWrite(pin_c6_enable, enable_and_camera ? FUN_HIGH : FUN_LOW);
 }
 
-void led_task(void) {
+void led_task(void* pvParameters) {
+    (void)pvParameters;
     static bool led_blink_state = false;
     static uint8_t message_fade_step = 0;
     static bool message_fade_init = false;
     static bool message_fade_direction = false;
 
-    switch (power_state) {
-        case PMIC_STATE_FAULT:
-            led_blink_state = !led_blink_state;
-            set_power_led(led_blink_state ? 0xFF0000 : 0x000000);
-            break;
-        case POWER_STATE_NO_BATTERY:
-            set_power_led(0xFF00FF);  // Magenta
-            break;
-        case POWER_STATE_BATTERY:
-            set_power_led(0x00FF00);  // Green
-            break;
-        case POWER_STATE_CHARGING:
-            set_power_led(0xFFFF00);  // Yellow
-            break;
-        default:
-        case POWER_STATE_UNINITIALIZED:
-            set_power_led(0xFFFFFF);  // White
-            break;
-    }
-
-    switch (radio_state) {
-        case RADIO_STATE_OFF:
-            set_radio_led(0x000000);  // Off
-            break;
-        case RADIO_STATE_BOOTLOADER:
-            set_radio_led(0x0000FF);  // Blue
-            break;
-        case RADIO_STATE_APPLICATION:
-            set_radio_led(0x00FF00);  // Green
-            break;
-        default:
-            set_radio_led(0xFFFFFF);  // White
-            break;
-    }
-
-    // Message LED
-    uint32_t message_color_a = 0;
-    if (message_state & 0x01) message_color_a |= 0xFF0000;
-    if (message_state & 0x02) message_color_a |= 0x00FF00;
-    if (message_state & 0x04) message_color_a |= 0x0000FF;
-    uint32_t message_color_b = 0;
-    if (message_state & 0x10) message_color_b |= 0xFF0000;
-    if (message_state & 0x20) message_color_b |= 0x00FF00;
-    if (message_state & 0x40) message_color_b |= 0x0000FF;
-    bool message_fade = message_state & 0x08;
-    bool message_fade_hold = message_state & 0x80;
-
-    if (message_fade) {
-        if (message_fade_init) {
-            message_color_b = 0;
+    for (;;) {
+        switch (power_state) {
+            case PMIC_STATE_FAULT:
+                led_blink_state = !led_blink_state;
+                set_power_led(led_blink_state ? 0xFF0000 : 0x000000);
+                break;
+            case POWER_STATE_NO_BATTERY:
+                set_power_led(0xFF00FF);  // Magenta
+                break;
+            case POWER_STATE_BATTERY:
+                set_power_led(0x00FF00);  // Green
+                break;
+            case POWER_STATE_CHARGING:
+                set_power_led(0xFFFF00);  // Yellow
+                break;
+            default:
+            case POWER_STATE_UNINITIALIZED:
+                set_power_led(0xFFFFFF);  // White
+                break;
         }
-        if (!message_fade_direction) {
-            if (message_fade_step >= 10) {
-                message_fade_direction = true;
-                message_fade_init = false;
-            } else {
-                message_fade_step++;
+
+        switch (radio_state) {
+            case RADIO_STATE_OFF:
+                set_radio_led(0x000000);  // Off
+                break;
+            case RADIO_STATE_BOOTLOADER:
+                set_radio_led(0x0000FF);  // Blue
+                break;
+            case RADIO_STATE_APPLICATION:
+                set_radio_led(0x00FF00);  // Green
+                break;
+            default:
+                set_radio_led(0xFFFFFF);  // White
+                break;
+        }
+
+        // Message LED
+        uint32_t message_color_a = 0;
+        if (message_state & 0x01) message_color_a |= 0xFF0000;
+        if (message_state & 0x02) message_color_a |= 0x00FF00;
+        if (message_state & 0x04) message_color_a |= 0x0000FF;
+        uint32_t message_color_b = 0;
+        if (message_state & 0x10) message_color_b |= 0xFF0000;
+        if (message_state & 0x20) message_color_b |= 0x00FF00;
+        if (message_state & 0x40) message_color_b |= 0x0000FF;
+        bool message_fade = message_state & 0x08;
+        bool message_fade_hold = message_state & 0x80;
+
+        if (message_fade) {
+            if (message_fade_init) {
+                message_color_b = 0;
             }
-        } else {
-            if (message_fade_step < 1) {
-                if (!message_fade_hold) {
-                    message_fade_direction = false;
+            if (!message_fade_direction) {
+                if (message_fade_step >= 10) {
+                    message_fade_direction = true;
+                    message_fade_init = false;
+                } else {
+                    message_fade_step++;
                 }
             } else {
-                message_fade_step--;
+                if (message_fade_step < 1) {
+                    if (!message_fade_hold) {
+                        message_fade_direction = false;
+                    }
+                } else {
+                    message_fade_step--;
+                }
             }
+
+            uint32_t combined_color = (((((message_color_a >> 16) & 0xFF) * message_fade_step) +
+                                        (((message_color_b >> 16) & 0xFF) * (10 - message_fade_step))) /
+                                       10)
+                                      << 16;
+            combined_color |= (((((message_color_a >> 8) & 0xFF) * message_fade_step) +
+                                (((message_color_b >> 8) & 0xFF) * (10 - message_fade_step))) /
+                               10)
+                              << 8;
+            combined_color |= (((((message_color_a >> 0) & 0xFF) * message_fade_step) +
+                                (((message_color_b >> 0) & 0xFF) * (10 - message_fade_step))) /
+                               10)
+                              << 0;
+            set_message_led(combined_color);
+        } else {
+            // Static color
+            set_message_led(message_color_a);
+
+            // Reset fade state
+            message_fade_step = 0;
+            message_fade_init = true;
+            message_fade_direction = false;
         }
 
-        uint32_t combined_color = (((((message_color_a >> 16) & 0xFF) * message_fade_step) +
-                                    (((message_color_b >> 16) & 0xFF) * (10 - message_fade_step))) /
-                                   10)
-                                  << 16;
-        combined_color |= (((((message_color_a >> 8) & 0xFF) * message_fade_step) +
-                            (((message_color_b >> 8) & 0xFF) * (10 - message_fade_step))) /
-                           10)
-                          << 8;
-        combined_color |= (((((message_color_a >> 0) & 0xFF) * message_fade_step) +
-                            (((message_color_b >> 0) & 0xFF) * (10 - message_fade_step))) /
-                           10)
-                          << 0;
-        set_message_led(combined_color);
-    } else {
-        // Static color
-        set_message_led(message_color_a);
-
-        // Reset fade state
-        message_fade_step = 0;
-        message_fade_init = true;
-        message_fade_direction = false;
+        write_addressable_leds();
+        vTaskDelay(pdMS_TO_TICKS(led_scan_interval));
     }
+}
+
+void keyboard_task(void* pvParameters) {
+    (void)pvParameters;
+    for (;;) {
+        // Set version registers (also periodically re-asserted here in case a host I2C
+        // write with a length that runs past its intended register range overwrites
+        // these read-only bytes, same as the original bare-metal main loop did).
+        i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
+        i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
+
+        bool set_keyboard_interrupt = keyboard_step(&i2c_registers[I2C_REG_KEYBOARD_0]);  // Scans one row when called
+        if (set_keyboard_interrupt) {
+            interrupt_set(true, false, false);
+        }
+
+        // Flush any pending addressable LED update (e.g. from a host I2C write) at a
+        // short, fixed interval; write_addressable_leds() is a cheap no-op if a DMA
+        // transfer is already in progress.
+        write_addressable_leds();
+
+        if (get_debug_available() > 0 && i2c_registers[I2C_REG_DEBUG] == 0) {
+            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(keyboard_scan_interval));
+    }
+}
+
+void input_task(void* pvParameters) {
+    (void)pvParameters;
+    bool power_button_latch = false;
+    uint8_t power_button_counter = 0;
+
+    for (;;) {
+        if (i2c_power_off_requested) {
+            i2c_power_off_requested = false;
+            rtc_configure_wakeup_pin(i2c_power_off_enable_wakeup);  // Enable alarm pin output if requested
+            power_off_leds_and_timers();
+            vTaskDelay(pdMS_TO_TICKS(10));
+            pmic_power_off();  // So long and thanks for all the fish
+        }
+
+        bool set_input_interrupt = input_step();  // Scans all inputs
+        if (set_input_interrupt) {
+            interrupt_set(false, true, false);
+        }
+
+        if (!funDigitalRead(pin_power_in)) {
+            if (power_button_latch && power_button_counter > 500 / input_scan_interval) {
+                power_off_leds_and_timers();
+                vTaskDelay(pdMS_TO_TICKS(10));
+                pmic_power_off();
+            }
+            if (power_button_counter == 0) {
+                set_powerbutton_led(0xFF0000);  // LED next to power button: red
+                write_addressable_leds();
+            }
+            power_button_counter++;
+        } else {
+            if (power_button_counter > 0) {
+                set_powerbutton_led(0x000000);  // LED next to power button: off
+                write_addressable_leds();
+            }
+            power_button_latch = true;
+            power_button_counter = 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(input_scan_interval));
+    }
+}
+
+void rtc_task(void* pvParameters) {
+    (void)pvParameters;
+    for (;;) {
+        uint32_t value = rtc_get_counter();
+        LockI2CSlave(true);
+        i2c_registers[I2C_REG_RTC_VALUE_0] = (value >> 0) & 0xFF;
+        i2c_registers[I2C_REG_RTC_VALUE_1] = (value >> 8) & 0xFF;
+        i2c_registers[I2C_REG_RTC_VALUE_2] = (value >> 16) & 0xFF;
+        i2c_registers[I2C_REG_RTC_VALUE_3] = (value >> 24) & 0xFF;
+        LockI2CSlave(false);
+
+        vTaskDelay(pdMS_TO_TICKS(rtc_scan_interval));
+    }
+}
+
+// Fault indicator: blinks the power LED `code` times, pauses, and repeats forever.
+// Used from contexts where the firmware has crashed and neither a debugger nor the
+// host I2C bus can be relied on to report what went wrong, so this must not depend
+// on either the scheduler or interrupts being in a working state: no vTaskDelay()
+// or Delay_Ms() (SysTick is reprogrammed into periodic-reload mode by the FreeRTOS
+// port and can't be used as a free-running counter here), just a busy-wait loop and
+// write_addressable_leds_blocking() (which polls the DMA hardware directly instead
+// of waiting for its completion interrupt to run).
+//
+// Blink codes in use: 1-16 from a CPU trap (see fault_trap_handler() below, derived
+// from the low nibble of MCAUSE), 2 for a task stack overflow, 5 for a FreeRTOS
+// configASSERT() failure (src/freertos/FreeRTOSConfig.h).
+static void fault_delay(void) {
+    for (volatile uint32_t i = 0; i < 1500000; i++) {
+    }
+}
+
+void fault_blink(unsigned int code) {
+    set_led_brightness(255);  // Ignore whatever brightness the host last configured
+    set_led_mode(1);          // Automatic mode, so set_power_led() below reaches the strip
+
+    while (1) {
+        for (unsigned int i = 0; i < code; i++) {
+            set_power_led(0xFF0000);  // Red
+            write_addressable_leds_blocking();
+            fault_delay();
+            set_power_led(0x000000);
+            write_addressable_leds_blocking();
+            fault_delay();
+        }
+        fault_delay();
+        fault_delay();
+    }
+}
+
+// Overrides the weak defaults in src/platform/ch32v003fun.c for the CPU exception
+// vectors (see the interrupt vector table in ch32v003fun.c for CH32V10x/V20x/V30x).
+// Gives a visible signal instead of silently spinning forever if the firmware hits a
+// hard fault, illegal instruction, misaligned access, unexpected ecall, or breakpoint
+// trap - i.e. if the firmware crashes. Plain (non-naked, non-interrupt) functions are
+// fine here: fault_blink() never returns, so no trap-return (mret) is ever needed.
+static void fault_trap_handler(void) {
+    uint32_t mcause = __get_MCAUSE();
+    fault_blink((mcause & 0xF) + 1);
+}
+
+void HardFault_Handler(void) {
+    fault_trap_handler();
+}
+
+void NMI_Handler(void) {
+    fault_trap_handler();
+}
+
+void Ecall_M_Mode_Handler(void) {
+    fault_trap_handler();
+}
+
+void Ecall_U_Mode_Handler(void) {
+    fault_trap_handler();
+}
+
+void Break_Point_Handler(void) {
+    fault_trap_handler();
+}
+
+// Required because configCHECK_FOR_STACK_OVERFLOW is enabled (src/freertos/FreeRTOSConfig.h).
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName) {
+    (void)xTask;
+    taskDISABLE_INTERRUPTS();
+    printf("stack overflow in task \"%s\"\r\n", pcTaskName);
+    fault_blink(2);
 }
 
 // Entry point
@@ -872,100 +1097,27 @@ int main() {
     // Read alarm setting
     read_alarm();
 
-    bool power_button_latch = false;
-    uint8_t power_button_counter = 0;
+    set_power_led(0xFFFFFF);
+    write_addressable_leds_blocking();
 
+    // xTaskCreate() fails silently (returns pdFAIL, task simply isn't created) rather
+    // than fault if configTOTAL_HEAP_SIZE (src/freertos/FreeRTOSConfig.h) runs out -
+    // check every call so an undersized heap is visible (fault_blink) instead of
+    // quietly dropping whichever tasks are created last.
+    BaseType_t task_creation_ok = pdPASS;
+    task_creation_ok &= xTaskCreate(keyboard_task, "keyboard", TASK_STACK_KEYBOARD, NULL, TASK_PRIORITY_KEYBOARD, NULL);
+    task_creation_ok &= xTaskCreate(input_task, "input", TASK_STACK_INPUT, NULL, TASK_PRIORITY_INPUT, NULL);
+    task_creation_ok &= xTaskCreate(rtc_task, "rtc", TASK_STACK_RTC, NULL, TASK_PRIORITY_RTC, NULL);
+    task_creation_ok &= xTaskCreate(radio_task, "radio", TASK_STACK_RADIO, NULL, TASK_PRIORITY_RADIO, NULL);
+    task_creation_ok &= xTaskCreate(led_task, "led", TASK_STACK_LED, NULL, TASK_PRIORITY_LED, NULL);
+    task_creation_ok &= xTaskCreate(pmic_task, "pmic", TASK_STACK_PMIC, NULL, TASK_PRIORITY_PMIC, NULL);
+    if (task_creation_ok != pdPASS) {
+        fault_blink(9);  // Out of heap: see configTOTAL_HEAP_SIZE in src/freertos/FreeRTOSConfig.h
+    }
+
+    vTaskStartScheduler();
+
+    // Should never get here: the scheduler has taken over above.
     while (1) {
-        uint32_t now = SysTick->CNT;
-
-        // Set version registers
-        i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
-        i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
-
-        static uint32_t keyboard_scan_previous = 0;
-        if (now - keyboard_scan_previous >= keyboard_scan_interval * DELAY_MS_TIME) {
-            keyboard_scan_previous = now;
-            bool set_keyboard_interrupt =
-                keyboard_step(&i2c_registers[I2C_REG_KEYBOARD_0]);  // Scans one row when called
-            if (set_keyboard_interrupt) {
-                interrupt_set(true, false, false);
-            }
-        }
-
-        static uint32_t input_scan_previous = 0;
-        if (now - input_scan_previous >= input_scan_interval * DELAY_MS_TIME) {
-            input_scan_previous = now;
-            bool set_input_interrupt = input_step();  // Scans all inputs
-            if (set_input_interrupt) {
-                interrupt_set(false, true, false);
-            }
-
-            if (!funDigitalRead(pin_power_in)) {
-                if (power_button_latch && power_button_counter > 500 / input_scan_interval) {
-                    timer2_set(0);
-                    timer3_set(0);
-                    for (uint8_t i = 0; i < 6; i++) {
-                        set_led_data(i, 0, false);  // Turn off all LEDs
-                        set_led_data(i, 0, true);   // Turn off all LEDs
-                    }
-                    write_addressable_leds();
-                    Delay_Ms(10);
-                    pmic_power_off();
-                }
-                if (power_button_counter == 0) {
-                    set_powerbutton_led(0xFF0000);  // LED next to power button: red
-                    write_addressable_leds();
-                }
-                power_button_counter++;
-            } else {
-                if (power_button_counter > 0) {
-                    set_powerbutton_led(0x000000);  // LED next to power button: off
-                    write_addressable_leds();
-                }
-                power_button_latch = true;
-                power_button_counter = 0;
-            }
-        }
-
-        static uint32_t rtc_previous = 0;
-        if (now - rtc_previous >= 1 * DELAY_MS_TIME) {
-            rtc_previous = now;
-            uint32_t value = rtc_get_counter();
-            LockI2CSlave(true);
-            i2c_registers[I2C_REG_RTC_VALUE_0] = (value >> 0) & 0xFF;
-            i2c_registers[I2C_REG_RTC_VALUE_1] = (value >> 8) & 0xFF;
-            i2c_registers[I2C_REG_RTC_VALUE_2] = (value >> 16) & 0xFF;
-            i2c_registers[I2C_REG_RTC_VALUE_3] = (value >> 24) & 0xFF;
-            LockI2CSlave(false);
-        }
-
-        static uint32_t pmic_previous = 250 * DELAY_MS_TIME;
-        if (now - pmic_previous >= 250 * DELAY_MS_TIME) {
-            pmic_previous = now;
-            pmic_task();
-        }
-
-        static uint32_t radio_previous = 0;
-        if (now - radio_previous >= 50 * DELAY_MS_TIME) {
-            radio_previous = now;
-            radio_task();
-        }
-
-        static uint32_t led_previous = 0;
-        if (now - led_previous >= 250 * DELAY_MS_TIME) {
-            led_previous = now;
-            led_task();
-        }
-
-        write_addressable_leds();
-
-        if (get_debug_available() > 0 && i2c_registers[I2C_REG_DEBUG] == 0) {
-            i2c_registers[I2C_REG_DEBUG] = get_debug_char();
-        }
-
-        funDigitalWrite(pin_interrupt,
-                        (keyboard_interrupt | input_interrupt | pmic_interrupt)
-                            ? FUN_LOW
-                            : FUN_HIGH);  // Update interrupt pin state
     }
 }

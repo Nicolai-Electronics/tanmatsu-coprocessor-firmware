@@ -66,6 +66,29 @@ bool write_addressable_leds(void) {
     return true;
 }
 
+// Variant of write_addressable_leds() for use from a fault/crash handler, where
+// interrupts may be disabled and the scheduler is not running: DMA1_Channel5_IRQHandler
+// above may never run to clear led_transmit_ready, so poll the DMA controller's
+// transfer-complete flag directly instead (TIM1/DMA1 keep running in hardware
+// regardless of whether the CPU has interrupts enabled).
+void write_addressable_leds_blocking(void) {
+    if (!led_transmit_ready) {
+        while (!(DMA1->INTFR & DMA1_IT_TC5)) {
+        }
+        DMA1->INTFCR = DMA1_IT_TC5;
+        TIM1->CTLR1 &= ~TIM_CEN;
+        led_transmit_ready = true;
+    }
+
+    write_addressable_leds();
+
+    while (!(DMA1->INTFR & DMA1_IT_TC5)) {
+    }
+    DMA1->INTFCR = DMA1_IT_TC5;
+    TIM1->CTLR1 &= ~TIM_CEN;
+    led_transmit_ready = true;
+}
+
 void led_init(void) {
     RCC->APB2PCENR |= RCC_APB2Periph_GPIOA;  // Enable clock for GPIOA
     RCC->APB2PCENR |= RCC_APB2Periph_TIM1;   // Enable clock for timer 1

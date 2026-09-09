@@ -6,9 +6,11 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include "FreeRTOS.h"
 #include "ch32v003fun.h"
 #include "i2c_master.h"
 #include "pmic_regs.h"
+#include "task.h"
 
 #define BQ25895_ADDR 0x6a
 
@@ -1403,7 +1405,7 @@ pmic_result_t pmic_battery_attached(bool* battery_attached, bool detect_empty_ba
     if (res != PMIC_OK) return res;
     res = pmic_set_battery_load_enable(true);  // Apply 30mA load on battery
     if (res != PMIC_OK) return res;
-    Delay_Ms(5);                                // Wait 5ms
+    vTaskDelay(pdMS_TO_TICKS(5));               // Wait 5ms
     res = pmic_set_battery_load_enable(false);  // Disable 30mA load on battery
     if (res != PMIC_OK) return res;
     res = pmic_get_adc_vbat(&vbatt, &therm_stat);  // Measure battery voltage
@@ -1422,13 +1424,13 @@ pmic_result_t pmic_battery_attached(bool* battery_attached, bool detect_empty_ba
         res = pmic_set_charge_voltage_limit(3700);  // Set charging end voltage to 3.7v
         if (res != PMIC_OK) return res;
         res = pmic_set_charge_enable(true);  // Enable charging
-        Delay_Ms(50);                        // Wait 50ms
+        vTaskDelay(pdMS_TO_TICKS(50));       // Wait 50ms
         if (res != PMIC_OK) return res;
         res = pmic_set_charge_enable(false);  // Disable charging
         if (res != PMIC_OK) return res;
         res = pmic_set_battery_load_enable(true);  // Apply 30mA load on battery
         if (res != PMIC_OK) return res;
-        Delay_Ms(5);                                // Wait 5ms
+        vTaskDelay(pdMS_TO_TICKS(5));               // Wait 5ms
         res = pmic_set_battery_load_enable(false);  // Disable 30mA load on battery
         if (res != PMIC_OK) return res;
         res = pmic_get_adc_vbat(&vbatt, &therm_stat);  // Measure battery voltage

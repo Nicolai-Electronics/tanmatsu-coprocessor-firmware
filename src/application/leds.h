@@ -13,3 +13,4 @@ void set_powerbutton_led(uint32_t color);
 void set_led_brightness(uint8_t brightness);
 void set_led_mode(uint8_t mode);
 bool write_addressable_leds(void);
+void write_addressable_leds_blocking(void);

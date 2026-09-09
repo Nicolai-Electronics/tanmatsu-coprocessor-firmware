@@ -4,7 +4,13 @@ cmake_policy(VERSION 3.21)
 set(PROJECT_NAME "coprocessor")
 set(PREFIX "riscv64-elf-" CACHE STRING "Toolchain prefix")
 
-project(${PROJECT_NAME} LANGUAGES C)
+# Must be set before project() so the initial compiler-detection/language
+# check picks up the cross toolchain instead of the host compiler.
+set(CMAKE_C_COMPILER "${PREFIX}gcc")
+set(CMAKE_CXX_COMPILER "${PREFIX}g++")
+set(CMAKE_ASM_COMPILER "${PREFIX}gcc")
+
+project(${PROJECT_NAME} LANGUAGES C ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -12,8 +18,6 @@ set(CMAKE_C_EXTENSIONS ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS On)
 
-set(CMAKE_C_COMPILER "${PREFIX}gcc")
-set(CMAKE_CXX_COMPILER "${PREFIX}g++")
 set(CMAKE_OBJCOPY "${PREFIX}objcopy")
 
 set(RISCV_COMPILER_FLAGS "-g -Os -flto -ffunction-sections -fdata-sections -fmessage-length=0 -msmall-data-limit=8 -march=rv32imac -mabi=ilp32 -DCH32V20x=1 -static-libgcc -nostdlib -I. -Wall  -Wl,--print-memory-usage -lgcc -T \"${CMAKE_CURRENT_BINARY_DIR}/platform/ch32v203c8.ld\" -Wl,--gc-sections")
@@ -35,5 +39,6 @@ set(CMAKE_MODULE_LINKER_FLAGS "${RISCV_LINKER_FLAGS} ${CMAKE_MODULE_LINKER_FLAGS
 set(CMAKE_EXE_LINKER_FLAGS    "${RISCV_LINKER_FLAGS} ${RISCV_LINKER_FLAGS_EXE} ${CMAKE_EXE_LINKER_FLAGS}")
 
 add_subdirectory(platform)
+add_subdirectory(freertos)
 add_subdirectory(hal)
 add_subdirectory(application)

@@ -15,4 +15,5 @@ target_include_directories(hal
 target_link_libraries(hal
 	PRIVATE
 		platform
+		freertos
 )

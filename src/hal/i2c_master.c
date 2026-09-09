@@ -28,9 +28,17 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "FreeRTOS.h"
 #include "ch32v003fun.h"
+#include "semphr.h"
+
+// Protects the I2C2 (PMIC) bus: pmic_task, radio_task and the power-off
+// sequence in input_task all issue PMIC transactions from separate tasks.
+static SemaphoreHandle_t i2c2_mutex = NULL;
 
 void SetupI2CMaster(void) {
+    i2c2_mutex = xSemaphoreCreateMutex();
+
     // Enable I2C2
     RCC->APB1PCENR |= RCC_APB1Periph_I2C2;
     RCC->APB2PCENR |= RCC_APB2Periph_GPIOB | RCC_APB2Periph_AFIO;
@@ -231,12 +239,19 @@ i2c_result_t pm_i2c_write_reg(uint8_t address, uint8_t reg, uint8_t* data, uint3
 
     buffer[0] = reg;
     memcpy(&buffer[1], data, length);
-    return pm_i2c_transaction(address, buffer, length + 1, NULL, 0);
+
+    xSemaphoreTake(i2c2_mutex, portMAX_DELAY);
+    i2c_result_t result = pm_i2c_transaction(address, buffer, length + 1, NULL, 0);
+    xSemaphoreGive(i2c2_mutex);
+    return result;
 }
 
 /**
  * @brief Read from the I2C bus
  */
 i2c_result_t pm_i2c_read_reg(uint8_t address, uint8_t reg, uint8_t* data, uint32_t length) {
-    return pm_i2c_transaction(address, &reg, 1, data, length);
+    xSemaphoreTake(i2c2_mutex, portMAX_DELAY);
+    i2c_result_t result = pm_i2c_transaction(address, &reg, 1, data, length);
+    xSemaphoreGive(i2c2_mutex);
+    return result;
 }
