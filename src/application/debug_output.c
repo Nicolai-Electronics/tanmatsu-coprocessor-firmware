@@ -2,7 +2,7 @@
 
 #include "debug_output.h"
 #include <stdint.h>
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 
 static int debug_module_likely_attached = 1;
 static uint32_t calls_since_recheck = 0;

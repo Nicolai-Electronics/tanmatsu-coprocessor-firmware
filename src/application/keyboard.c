@@ -5,7 +5,7 @@
 #include "keyboard.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 
 // Configuration
 static const uint8_t keyboard_rows[] = {PA8, PA9, PA10, PA4, PA3, PA1, PA6, PA5, PA2};

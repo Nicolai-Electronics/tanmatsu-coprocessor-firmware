@@ -30,7 +30,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 
 typedef enum i2c_result {
     i2c_ok = 0,

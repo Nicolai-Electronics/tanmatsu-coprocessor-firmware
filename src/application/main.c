@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "FreeRTOS.h"
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 #include "debug_output.h"
 #include "hardware.h"
 #include "i2c_master.h"
@@ -516,6 +516,7 @@ void configure_usb_input(void) {
 
 void pmic_task(void* pvParameters) {
     (void)pvParameters;
+    printf("pmic_task: started\r\n");
 
     // Periodic task for controlling PMIC
     static uint8_t empty_battery_delay = 4;
@@ -539,6 +540,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_faults(&raw_faults, &faults);
         set_pmic_status(res);
         if (res != PMIC_OK) {
+            printf("pmic_task: pmic_get_faults failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
         uint8_t prev_raw_faults = i2c_registers[I2C_REG_PMIC_FAULT];
@@ -552,6 +554,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_adc_vbat(&adc_vbat, NULL);
         if (res != PMIC_OK) {
             set_pmic_status(res);
+            printf("pmic_task: pmic_get_adc_vbat failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
 
@@ -559,6 +562,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_adc_vsys(&adc_vsys);
         if (res != PMIC_OK) {
             set_pmic_status(res);
+            printf("pmic_task: pmic_get_adc_vsys failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
 
@@ -566,6 +570,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_adc_tspct(&adc_tspct);
         if (res != PMIC_OK) {
             set_pmic_status(res);
+            printf("pmic_task: pmic_get_adc_tspct failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
 
@@ -573,6 +578,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_adc_ichgr(&adc_ichgr);
         if (res != PMIC_OK) {
             set_pmic_status(res);
+            printf("pmic_task: pmic_get_adc_ichgr failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
 
@@ -623,6 +629,7 @@ void pmic_task(void* pvParameters) {
                 res = pmic_get_fast_charge_current(&readback_current);
                 if (res != PMIC_OK) {
                     set_pmic_status(res);
+                    printf("pmic_task: pmic_get_fast_charge_current failed (%d)\r\n", res);
                     goto pmic_task_iteration_done;  // Stop on communication error
                 }
                 if (readback_current != pmic_target_charging_current) {
@@ -666,6 +673,7 @@ void pmic_task(void* pvParameters) {
         res = pmic_get_charge_status(&charge_status);
         if (res != PMIC_OK) {
             set_pmic_status(res);
+            printf("pmic_task: pmic_get_charge_status failed (%d)\r\n", res);
             goto pmic_task_iteration_done;  // Stop on communication error
         }
 
@@ -689,6 +697,7 @@ void pmic_task(void* pvParameters) {
 
 void radio_task(void* pvParameters) {
     (void)pvParameters;
+    printf("radio_task: started\r\n");
     for (;;) {
         bool enable_and_camera = false;
         bool boot_and_usb = false;
@@ -768,6 +777,7 @@ void radio_task(void* pvParameters) {
 
 void led_task(void* pvParameters) {
     (void)pvParameters;
+    printf("led_task: started\r\n");
     static bool led_blink_state = false;
     static uint8_t message_fade_step = 0;
     static bool message_fade_init = false;
@@ -872,6 +882,7 @@ void led_task(void* pvParameters) {
 
 void keyboard_task(void* pvParameters) {
     (void)pvParameters;
+    printf("keyboard_task: started\r\n");
     for (;;) {
         // Set version registers (also periodically re-asserted here in case a host I2C
         // write with a length that runs past its intended register range overwrites
@@ -895,6 +906,7 @@ void keyboard_task(void* pvParameters) {
 
 void input_task(void* pvParameters) {
     (void)pvParameters;
+    printf("input_task: started\r\n");
     bool power_button_latch = false;
     uint8_t power_button_counter = 0;
 
@@ -938,6 +950,7 @@ void input_task(void* pvParameters) {
 
 void rtc_task(void* pvParameters) {
     (void)pvParameters;
+    printf("rtc_task: started\r\n");
     for (;;) {
         uint32_t value = rtc_get_counter();
         LockI2CSlave(true);
@@ -992,8 +1005,22 @@ void fault_blink(unsigned int code) {
 // hard fault, illegal instruction, misaligned access, unexpected ecall, or breakpoint
 // trap - i.e. if the firmware crashes. Plain (non-naked, non-interrupt) functions are
 // fine here: fault_blink() never returns, so no trap-return (mret) is ever needed.
+// Debug-only: captured trap state, readable from a debugger while fault_blink()
+// spins forever below (e.g. `print/x debug_fault_mcause`, `print/x debug_fault_mepc`).
+// Sentinel (nonzero, non-1) initializers force these into .data instead of
+// .bss, so crt0's unconditional data-copy-from-flash (handle_reset(), runs on
+// every reset before anything else) re-arms the sentinel every single boot -
+// letting us tell a fresh crash apart from stale RAM left over from a
+// previous run/flash cycle when inspecting over the debugger.
+volatile uint32_t debug_fault_mcause = 0xAAAAAAAA;
+volatile uint32_t debug_fault_mepc = 0xAAAAAAAA;
+volatile uint32_t debug_fault_mtval = 0xAAAAAAAA;
+
 static void fault_trap_handler(void) {
     uint32_t mcause = __get_MCAUSE();
+    debug_fault_mcause = mcause;
+    debug_fault_mepc = __get_MEPC();
+    debug_fault_mtval = __get_MTVAL();
     fault_blink((mcause & 0xF) + 1);
 }
 
@@ -1030,6 +1057,10 @@ int main() {
     SystemInit();
     funGpioInitAll();
 
+    Delay_Ms(100);
+
+    printf("\r\n\r\n=== Tanmatsu coprocessor firmware v%d booting ===\r\n", FW_VERSION);
+
     // Set version registers
     i2c_registers[I2C_REG_FW_VERSION_0] = (FW_VERSION) & 0xFF;
     i2c_registers[I2C_REG_FW_VERSION_1] = (FW_VERSION >> 8) & 0xFF;
@@ -1040,38 +1071,46 @@ int main() {
     i2c_registers[I2C_REG_LED_MODE] = 1;             // Automatic LED mode
 
     // Initialize keyboard
+    printf("Boot: keyboard_init...\r\n");
     keyboard_init();
+    printf("Boot: keyboard_init done\r\n");
 
     // Initialize I2C slave
+    printf("Boot: I2C slave (host-facing) init...\r\n");
     funPinMode(pin_sda, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SDA
     funPinMode(pin_scl, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SCL
     SetupI2CSlave(0x5f, i2c_registers, sizeof(i2c_registers), i2c_write_cb, i2c_read_cb, false);
+    printf("Boot: I2C slave init done (debug log now also readable via I2C_REG_DEBUG_0..7)\r\n");
 
     // Initialize I2C master
+    printf("Boot: I2C master (PMIC-facing) init...\r\n");
     funPinMode(pin_pm_sda, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SDA
     funPinMode(pin_pm_scl, GPIO_CFGLR_OUT_10Mhz_AF_OD);  // SCL
     SetupI2CMaster();
+    printf("Boot: I2C master init done\r\n");
 
     // Disable PMIC I2C watchdog
-    pmic_set_watchdog_timer_limit(0);
+    printf("Boot: pmic_set_watchdog_timer_limit -> %d\r\n", pmic_set_watchdog_timer_limit(0));
 
     // Connect battery if previously disabled
-    pmic_set_battery_disconnect_enable(false);
+    printf("Boot: pmic_set_battery_disconnect_enable -> %d\r\n", pmic_set_battery_disconnect_enable(false));
 
     // Configure USB power input
+    printf("Boot: configure_usb_input...\r\n");
     configure_usb_input();
+    printf("Boot: configure_usb_input done\r\n");
 
     // Configure other stuff
-    pmic_set_battery_load_enable(false);          // Disable 30mA load on battery
-    pmic_set_minimum_system_voltage_limit(3500);  // 3.5v (default)
-    pmic_set_adc_configuration(false, false);     // Disable continuous ADC mode
+    printf("Boot: pmic_set_battery_load_enable(false) -> %d\r\n", pmic_set_battery_load_enable(false));
+    printf("Boot: pmic_set_minimum_system_voltage_limit -> %d\r\n", pmic_set_minimum_system_voltage_limit(3500));
+    printf("Boot: pmic_set_adc_configuration -> %d\r\n", pmic_set_adc_configuration(false, false));
 
     // Configure battery charger
-    pmic_set_charge_enable(false);              // Disable battery charging
-    pmic_set_pumpx_enable(false);               // Disable current pulse control
-    pmic_configure_battery_charger(true, 512);  // Battery attached and charge at 512mA
+    printf("Boot: pmic_set_charge_enable(false) -> %d\r\n", pmic_set_charge_enable(false));
+    printf("Boot: pmic_set_pumpx_enable(false) -> %d\r\n", pmic_set_pumpx_enable(false));
+    printf("Boot: pmic_configure_battery_charger -> %d\r\n", pmic_configure_battery_charger(true, 512));
 
-    pmic_set_otg_enable(true);  // Enable OTG booster (for testing)
+    printf("Boot: pmic_set_otg_enable(true) -> %d\r\n", pmic_set_otg_enable(true));  // Enable OTG booster (for testing)
 
     // ESP32-C6
     funPinMode(pin_c6_enable, GPIO_Speed_10MHz | GPIO_CNF_OUT_PP);
@@ -1080,10 +1119,14 @@ int main() {
     funDigitalWrite(pin_c6_boot, FUN_LOW);
 
     // Display backlight
+    printf("Boot: timer3_init (display backlight)...\r\n");
     timer3_init();  // Use timer 3 channel 1 as PWM output for controlling display backlight
+    printf("Boot: timer3_init done\r\n");
 
     // Keyboard backlight
+    printf("Boot: timer2_init (keyboard backlight)...\r\n");
     timer2_init();  // Use timer 2 channel 2 as PWM output for controlling keyboard backlight
+    printf("Boot: timer2_init done\r\n");
 
     // Interrupt
     funPinMode(pin_interrupt, GPIO_Speed_10MHz | GPIO_CNF_OUT_OD);
@@ -1101,38 +1144,75 @@ int main() {
     funDigitalWrite(pin_amplifier_enable, FUN_LOW);
 
     // Addressable LEDs
+    printf("Boot: led_init...\r\n");
     led_init();
+    printf("Boot: led_init done\r\n");
 
-    // Real time clock
+    // Real time clock (see the printf tracing inside rtc_init()/rtc.c for
+    // fine-grained progress - this call can hang forever on missing/faulty
+    // LSE crystal hardware, see the NOTE above the LSERDY wait loop there)
+    printf("Boot: rtc_init...\r\n");
     rtc_init();
+    printf("Boot: rtc_init done\r\n");
 
     // Backup registers
+    printf("Boot: bkp_read_all...\r\n");
     bkp_read_all();
+    printf("Boot: bkp_read_all done\r\n");
 
     // Read alarm setting
     read_alarm();
 
     set_power_led(0xFFFFFF);
+    // NOTE: write_addressable_leds_blocking() (src/application/leds.c) polls the
+    // DMA1 transfer-complete flag with no timeout - if the addressable LED chain
+    // is not connected/powered or TIM1/DMA1 are misconfigured, this hangs forever
+    // and none of the code below (including task creation) is ever reached.
+    printf("Boot: write_addressable_leds_blocking...\r\n");
     write_addressable_leds_blocking();
+    printf("Boot: write_addressable_leds_blocking done\r\n");
 
     // xTaskCreate() fails silently (returns pdFAIL, task simply isn't created) rather
     // than fault if configTOTAL_HEAP_SIZE (src/freertos/FreeRTOSConfig.h) runs out -
     // check every call so an undersized heap is visible (fault_blink) instead of
     // quietly dropping whichever tasks are created last.
     BaseType_t task_creation_ok = pdPASS;
-    task_creation_ok &= xTaskCreate(keyboard_task, "keyboard", TASK_STACK_KEYBOARD, NULL, TASK_PRIORITY_KEYBOARD, NULL);
-    task_creation_ok &= xTaskCreate(input_task, "input", TASK_STACK_INPUT, NULL, TASK_PRIORITY_INPUT, NULL);
-    task_creation_ok &= xTaskCreate(rtc_task, "rtc", TASK_STACK_RTC, NULL, TASK_PRIORITY_RTC, NULL);
-    task_creation_ok &= xTaskCreate(radio_task, "radio", TASK_STACK_RADIO, NULL, TASK_PRIORITY_RADIO, NULL);
-    task_creation_ok &= xTaskCreate(led_task, "led", TASK_STACK_LED, NULL, TASK_PRIORITY_LED, NULL);
-    task_creation_ok &= xTaskCreate(pmic_task, "pmic", TASK_STACK_PMIC, NULL, TASK_PRIORITY_PMIC, NULL);
+    BaseType_t result;
+
+    result = xTaskCreate(keyboard_task, "keyboard", TASK_STACK_KEYBOARD, NULL, TASK_PRIORITY_KEYBOARD, NULL);
+    printf("Boot: xTaskCreate(keyboard) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
+    result = xTaskCreate(input_task, "input", TASK_STACK_INPUT, NULL, TASK_PRIORITY_INPUT, NULL);
+    printf("Boot: xTaskCreate(input) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
+    result = xTaskCreate(rtc_task, "rtc", TASK_STACK_RTC, NULL, TASK_PRIORITY_RTC, NULL);
+    printf("Boot: xTaskCreate(rtc) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
+    result = xTaskCreate(radio_task, "radio", TASK_STACK_RADIO, NULL, TASK_PRIORITY_RADIO, NULL);
+    printf("Boot: xTaskCreate(radio) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
+    result = xTaskCreate(led_task, "led", TASK_STACK_LED, NULL, TASK_PRIORITY_LED, NULL);
+    printf("Boot: xTaskCreate(led) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
+    result = xTaskCreate(pmic_task, "pmic", TASK_STACK_PMIC, NULL, TASK_PRIORITY_PMIC, NULL);
+    printf("Boot: xTaskCreate(pmic) -> %d\r\n", (int)result);
+    task_creation_ok &= result;
+
     if (task_creation_ok != pdPASS) {
+        printf("Boot: task creation failed, out of heap (configTOTAL_HEAP_SIZE), blinking fault code 9\r\n");
         fault_blink(9);  // Out of heap: see configTOTAL_HEAP_SIZE in src/freertos/FreeRTOSConfig.h
     }
 
+    printf("Boot: all tasks created, starting scheduler...\r\n");
     vTaskStartScheduler();
 
     // Should never get here: the scheduler has taken over above.
+    printf("Boot: vTaskStartScheduler() returned - this should be unreachable!\r\n");
     while (1) {
     }
 }

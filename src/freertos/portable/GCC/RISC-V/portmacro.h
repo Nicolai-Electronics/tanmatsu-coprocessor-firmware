@@ -3,7 +3,7 @@
  * Author             : WCH
  * Version            : V1.0
  * Date               : 2023/10/25
- * Description        : WCH Qingke V4C FreeRTOSÒÆÖ²»ã±à½Ó¿Ú
+ * Description        : WCH Qingke V4C FreeRTOSï¿½ï¿½Ö²ï¿½ï¿½ï¿½Ó¿ï¿½
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * SPDX-License-Identifier: Apache-2.0
  *******************************************************************************/

@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: MIT
 
 #include "rtc.h"
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include "ch32v003fun.h"
+#include <stdio.h>
+#include "ch32fun.h"
 
 #define PWR_CTLR_R2KSTY   ((uint32_t)0x00010000) /* 2K/20K enable flag (standby) */
 #define PWR_CTLR_R30KSTY  ((uint32_t)0x00020000) /* 30K RAM enable flag (standby) */
@@ -29,15 +31,25 @@ void rtc_exit_config(void) {
     RTC->CTLRL &= (uint16_t) ~((uint16_t)RTC_CTLRL_CNF);
 }
 
+// NOTE: unbounded busy-wait - if RTC->CTLRL never reports RTOFF (e.g. the RTC
+// APB1 clock enable was lost, or the backup domain never came out of reset)
+// this hangs forever. The printf below is the only way to tell that this is
+// where execution got stuck.
 void rtc_wait_for_last_task(void) {
+    printf("rtc: waiting for RTOFF...\r\n");
     while ((RTC->CTLRL & RTC_FLAG_RTOFF) == 0) {
     }
+    printf("rtc: RTOFF set\r\n");
 }
 
+// NOTE: unbounded busy-wait - if RSF never gets set (e.g. no RTC clock is
+// actually reaching the RTC peripheral) this hangs forever.
 void rtc_wait_for_sync(void) {
+    printf("rtc: waiting for RSF (clock sync)...\r\n");
     RTC->CTLRL &= (uint16_t)~RTC_FLAG_RSF;
     while ((RTC->CTLRL & RTC_FLAG_RSF) == 0) {
     }
+    printf("rtc: RSF set\r\n");
 }
 
 void rtc_set_prescaler(uint32_t value) {
@@ -83,6 +95,8 @@ uint32_t rtc_read_divider(void) {
 }
 
 void rtc_init(void) {
+    printf("rtc_init: enter, BDCTLR=0x%08" PRIx32 "\r\n", (uint32_t)RCC->BDCTLR);
+
     RCC->APB1PCENR |= RCC_APB1Periph_PWR | RCC_APB1Periph_BKP;
 
     bool rtc_not_ready = false;
@@ -92,13 +106,20 @@ void rtc_init(void) {
     rtc_not_ready |= !(RCC->BDCTLR | RCC_RTCEN);       // If RTC is not enabled
     rtc_not_ready |= !(rtc_get_prescaler() == 32768);  // If RTC is not set to tick once per second
 
+    printf("rtc_init: rtc_not_ready=%d\r\n", rtc_not_ready);
+
     if (rtc_not_ready) {
         rtc_disable_wp();          // Disable backup domain write protection
         RCC->BDCTLR |= RCC_LSEON;  // Enable LSE
 
-        // Wait for LSE oscillator ready
+        // NOTE: unbounded busy-wait - if the external 32.768kHz crystal on the
+        // LSE pins is missing, not oscillating, or misconfigured, this never
+        // returns and main() (and therefore the whole firmware, since this
+        // runs before vTaskStartScheduler()) hangs here forever.
+        printf("rtc_init: waiting for LSERDY...\r\n");
         while (!(RCC->BDCTLR & RCC_LSERDY)) {
         }
+        printf("rtc_init: LSERDY set\r\n");
 
         RCC->BDCTLR |= RCC_RTCSEL_0;  // Use LSE oscillator as RTC clock source
         RCC->BDCTLR |= RCC_RTCEN;     // Enable RTC
@@ -111,6 +132,8 @@ void rtc_init(void) {
         rtc_wait_for_last_task();
         rtc_enable_wp();  // Enable backup domain write protection
     }
+
+    printf("rtc_init: done\r\n");
 }
 
 // Backup registers

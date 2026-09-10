@@ -17,11 +17,7 @@
 .extern vTaskSwitchContext
 .extern xISRStackTop
 
-/* This project's linker script (src/platform/ch32v003fun.ld) has no rule
-   for a .highcode.* section (the __HIGH_CODE fast-code placement macro
-   this port normally uses doesn't exist in this fork of ch32fun), so use
-   plain .text like every other ISR in this codebase instead. */
-.section	.text,"ax",@progbits
+.section	.highcode.SW_Handler,"ax",@progbits
 .option arch, +zicsr
 .align 2
 .func

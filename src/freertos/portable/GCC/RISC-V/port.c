@@ -3,7 +3,7 @@
  * Author             : WCH
  * Version            : V1.0
  * Date               : 2023/10/25
- * Description        : WCH Qingke V4C FreeRTOSÒÆÖ²»ã±à½Ó¿Ú
+ * Description        : WCH Qingke V4C FreeRTOSï¿½ï¿½Ö²ï¿½ï¿½ï¿½Ó¿ï¿½
  * Copyright (c) 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * SPDX-License-Identifier: Apache-2.0
  *******************************************************************************/
@@ -82,7 +82,12 @@ task stack, not the ISR stack). */
 extern void SW_Handler(void);
 extern void SysTick_Handler( void );
 
+/* Tick period in SysTick counts, needed by SysTick_Handler below to re-arm
+CMP on every interrupt - see the comment there for why. */
+static uint64_t xSysTickReloadTicks = 0;
+
 uint32_t SysTick_Config(uint64_t ticks) {
+	xSysTickReloadTicks = ticks;
 	SysTick->CMP = ticks - 1; /* set reload register */
 	NVIC_EnableIRQ(SysTick_IRQn);
 	SysTick->CTLR = SYSTICK_CTLR_STRE |
@@ -160,6 +165,20 @@ void vPortEndScheduler( void ) {
 __INTERRUPT
 __HIGH_CODE
 void SysTick_Handler( void ) {
+	/* CMP is a one-shot compare value, not an auto-reloading period - despite
+	SYSTICK_CTLR_STRE being set, confirmed on real hardware that CMP just
+	sits at its initial value forever after the first match (CNT keeps
+	counting past it, SR never sets again), so xTaskIncrementTick() only
+	ever ran once and the whole scheduler appeared to freeze after tick 1.
+	Re-arm it every interrupt. Base the new value on the *current* CNT
+	rather than incrementing the old CMP: also confirmed on real hardware
+	that "CMP += period" only keeps ticks running for exactly one more
+	period before drifting behind CNT again and permanently missing every
+	match after that (presumably interrupt/ISR entry latency eating into
+	the period) - computing the next target from CNT is self-correcting
+	and can never already be in the past when it's written. */
+	SysTick->CMP = SysTick->CNT + xSysTickReloadTicks;
+
 	if( xTaskIncrementTick() != pdFALSE )
 	{
 		portYIELD();

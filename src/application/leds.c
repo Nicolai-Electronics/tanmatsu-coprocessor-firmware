@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 
 #define NUM_LEDS        6
 #define TIMER1_MAX_DUTY (176 + 4)
@@ -71,7 +71,15 @@ bool write_addressable_leds(void) {
 // above may never run to clear led_transmit_ready, so poll the DMA controller's
 // transfer-complete flag directly instead (TIM1/DMA1 keep running in hardware
 // regardless of whether the CPU has interrupts enabled).
+//
+// This is also called with interrupts fully enabled (from main(), before the
+// scheduler starts) - DMA1_Channel5_IRQn must be disabled for the duration,
+// otherwise DMA1_Channel5_IRQHandler races the polling loops below for the
+// same TC5 flag and (being an ISR) always wins, clearing TC5/CEN before the
+// polling loop ever observes TC5 set, which then spins forever.
 void write_addressable_leds_blocking(void) {
+    NVIC_DisableIRQ(DMA1_Channel5_IRQn);
+
     if (!led_transmit_ready) {
         while (!(DMA1->INTFR & DMA1_IT_TC5)) {
         }
@@ -87,6 +95,8 @@ void write_addressable_leds_blocking(void) {
     DMA1->INTFCR = DMA1_IT_TC5;
     TIM1->CTLR1 &= ~TIM_CEN;
     led_transmit_ready = true;
+
+    NVIC_EnableIRQ(DMA1_Channel5_IRQn);
 }
 
 void led_init(void) {

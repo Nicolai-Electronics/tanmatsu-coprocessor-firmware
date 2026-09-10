@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "FreeRTOS.h"
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 #include "i2c_master.h"
 #include "pmic_regs.h"
 #include "task.h"

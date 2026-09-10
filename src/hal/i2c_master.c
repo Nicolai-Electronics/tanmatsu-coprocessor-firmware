@@ -29,7 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "FreeRTOS.h"
-#include "ch32v003fun.h"
+#include "ch32fun.h"
 #include "semphr.h"
 
 // Protects the I2C2 (PMIC) bus: pmic_task, radio_task and the power-off
